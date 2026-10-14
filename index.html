@@ -3,29 +3,26 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MindGame</title>
-  <meta name="description" content="MindGame — chess reimagined in 3D, with new game modes, a bolder knight and computer opponents.">
+  <title>Space Chess</title>
+  <meta name="description" content="Space Chess — chess in orbit, with black holes, a wormhole and computer opponents.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9A%80%3C/text%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <!-- Main menu: every mode with its full rules -->
+  <!-- Main menu -->
   <main id="menu" class="screen">
     <header class="hero">
       <div class="logo" aria-hidden="true"><span class="b">♞&#xFE0E;</span><span class="p">♚&#xFE0E;</span></div>
-      <h1>Mind<span>Game</span></h1>
-      <p class="sub">Chess, reimagined. Pick a mode, read the rules, and play a friend or the computer.</p>
+      <h1>Space <span>Chess</span></h1>
+      <p class="sub">Chess in orbit. Steer clear of the black holes, ride the wormhole, and fly off one edge of the board to come back on the other.</p>
     </header>
-
-    <section class="rules-all card">
-      <h2>Rules in every mode</h2>
-      <ul id="global-rules"></ul>
-    </section>
-
-    <section id="mode-cards" class="modes"></section>
-    <footer class="foot">Blue pieces = classic White · Pink pieces = classic Black</footer>
+    <nav class="main-menu">
+      <button id="btn-play" class="primary big">Play</button>
+      <button id="btn-rules" class="big">Rules</button>
+    </nav>
   </main>
 
   <!-- Game -->

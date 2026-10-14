@@ -1,8 +1,13 @@
-// MindGame rules engine: board representation, move generation, make/unmake.
+// Space Chess rules engine: board representation, move generation, make/unmake.
 // Pure logic with no DOM access, so it runs in the page, in the AI worker and under Node tests.
 //
 // Board squares are indexed i = y * w + x, with y = 0 at the top of the screen.
 // A piece is { t: 'K'|'Q'|'R'|'B'|'N'|'P', p: playerIndex, m: hasMoved }.
+//
+// Space rules, all driven by the mode object:
+//   mode.wrap       - orbit wrap: the left and right edges are joined, so files wrap around.
+//   mode.holes      - black holes: squares that don't exist (nothing lands on or passes through them).
+//   mode.wormholes  - [[a, b], ...] linked squares: a non-pawn piece on one may warp to the other.
 
 export const VALUE = { P: 100, N: 350, B: 330, R: 500, Q: 900, K: 0 };
 export const PROMOS = ['Q', 'R', 'B', 'N'];
@@ -26,6 +31,13 @@ export function validMask(mode) {
   return valid;
 }
 
+// For each square, the square its wormhole leads to (or -1).
+export function warpMap(mode) {
+  const warp = new Int16Array(mode.w * mode.h).fill(-1);
+  for (const [a, b] of mode.wormholes || []) { warp[a] = b; warp[b] = a; }
+  return warp;
+}
+
 export function createState(mode) {
   const n = mode.players.length;
   const board = new Array(mode.w * mode.h).fill(null);
@@ -36,12 +48,12 @@ export function createState(mode) {
     if (t === 'K') kings[p] = i;
   }
   return {
-    mode, w: mode.w, h: mode.h, n, board, valid: validMask(mode), kings,
+    mode, w: mode.w, h: mode.h, n, board, valid: validMask(mode), warp: warpMap(mode), kings,
     turn: 0, alive: new Array(n).fill(true), ep: null, halfmove: 0, ply: 0,
   };
 }
 
-// Deep copy of everything mutable; the hole mask is shared because it never changes.
+// Deep copy of everything mutable; the hole mask and wormhole map are shared because they never change.
 export function cloneState(s) {
   return {
     ...s,
@@ -54,13 +66,13 @@ export function cloneState(s) {
 
 // Plain-data form for postMessage; restore() rebuilds it with the mode object.
 export function snapshot(s) {
-  const { mode, valid, ...rest } = cloneState(s);
+  const { mode, valid, warp, ...rest } = cloneState(s);
   return { ...rest, modeId: mode.id };
 }
 
 export function restore(snap, mode) {
   const { modeId, ...rest } = snap;
-  return { ...rest, mode, valid: validMask(mode) };
+  return { ...rest, mode, valid: validMask(mode), warp: warpMap(mode) };
 }
 
 // Loads a standard FEN into a 2-player 8x8 mode (used by tests). White = player 0.
@@ -80,14 +92,13 @@ export function fromFEN(mode, fen) {
       x++;
     }
   });
-  const unmove = (x, y, t) => {
-    const c = s.board[y * 8 + x];
-    if (c && c.t === t) c.m = false;
-  };
+  const unmove = i => { if (s.board[i]) s.board[i].m = false; };
   for (const r of castling === '-' ? '' : castling) {
-    const y = r === r.toUpperCase() ? 7 : 0;
-    unmove(4, y, 'K');
-    unmove('Kk'.includes(r) ? 7 : 0, y, 'R');
+    const p = r === r.toUpperCase() ? 0 : 1;
+    const k = s.kings[p], y = (k - (k % 8)) / 8;
+    unmove(k);
+    const rook = y * 8 + ('Kk'.includes(r) ? 7 : 0);
+    if (s.board[rook]?.t === 'R') unmove(rook);
   }
   s.turn = side === 'w' ? 0 : 1;
   if (ep && ep !== '-') {
@@ -98,9 +109,29 @@ export function fromFEN(mode, fen) {
   return s;
 }
 
+// Square index at (x, y), or -1 if it is off the board or a black hole. Files wrap in orbit mode.
 export function sqAt(s, x, y) {
+  if (y < 0 || y >= s.h) return -1;
+  if (x < 0 || x >= s.w) {
+    if (!s.mode.wrap) return -1;
+    x = ((x % s.w) + s.w) % s.w;
+  }
+  const i = y * s.w + x;
+  return s.valid[i] ? i : -1;
+}
+
+// Like sqAt but never wraps (castling stays on its own side of the seam).
+function sqFlat(s, x, y) {
   return x >= 0 && y >= 0 && x < s.w && y < s.h && s.valid[y * s.w + x] ? y * s.w + x : -1;
 }
+
+// Longest useful ray. On a wrapped rank a longer ray would come back around to its start.
+const rayLen = s => Math.max(s.w, s.h) - 1;
+
+// On a wrapped board two rays can reach the same square (a rook going left or right around
+// an empty rank), so slide() stamps each target to emit every move only once.
+const stamp = new Int32Array(4096);
+let stampId = 0;
 
 export function sqName(s, i) {
   const x = i % s.w, y = (i - x) / s.w;
@@ -128,6 +159,7 @@ export function pseudoMoves(s, p, capturesOnly = false) {
     const pc = board[i];
     if (!pc || pc.p !== p) continue;
     const x = i % w, y = (i - x) / w;
+    const start = out.length;
     switch (pc.t) {
       case 'N': leap(s, p, i, x, y, knightJumps(s.mode), out, capturesOnly); break;
       case 'K':
@@ -139,8 +171,19 @@ export function pseudoMoves(s, p, capturesOnly = false) {
       case 'Q': slide(s, p, i, x, y, KING, out, capturesOnly); break;
       case 'P': pawn(s, p, i, x, y, pc, out, capturesOnly); break;
     }
+    if (s.warp[i] >= 0 && pc.t !== 'P') warpMove(s, p, i, s.warp[i], out, start, capturesOnly);
   }
   return out;
+}
+
+// A non-pawn piece standing on a wormhole may warp to its twin, capturing an enemy there.
+// If the piece could already reach the twin normally (e.g. along a wrapped diagonal),
+// the ordinary move covers it.
+function warpMove(s, p, i, j, out, start, capturesOnly) {
+  for (let k = start; k < out.length; k++) if (out[k].to === j) return;
+  const t = s.board[j];
+  if (t) { if (t.p !== p) out.push({ from: i, to: j, cap: true, warp: true }); }
+  else if (!capturesOnly) out.push({ from: i, to: j, warp: true });
 }
 
 function leap(s, p, i, x, y, dirs, out, capturesOnly) {
@@ -154,13 +197,16 @@ function leap(s, p, i, x, y, dirs, out, capturesOnly) {
 }
 
 function slide(s, p, i, x, y, dirs, out, capturesOnly) {
+  const id = ++stampId, len = rayLen(s);
   for (const [dx, dy] of dirs) {
-    for (let cx = x + dx, cy = y + dy; ; cx += dx, cy += dy) {
+    for (let k = 1, cx = x + dx, cy = y + dy; k <= len; k++, cx += dx, cy += dy) {
       const j = sqAt(s, cx, cy);
       if (j < 0) break;
       const t = s.board[j];
-      if (t) { if (t.p !== p) out.push({ from: i, to: j, cap: true }); break; }
-      if (!capturesOnly) out.push({ from: i, to: j });
+      const fresh = stamp[j] !== id;
+      stamp[j] = id;
+      if (t) { if (t.p !== p && fresh) out.push({ from: i, to: j, cap: true }); break; }
+      if (!capturesOnly && fresh) out.push({ from: i, to: j });
     }
   }
 }
@@ -200,13 +246,13 @@ function castles(s, p, i, x, y, pc, out) {
   let inCheckNow = null;
   for (const k of [-1, 1]) {
     let cx = x + k * ax, cy = y + k * ay, dist = 1, j;
-    while ((j = sqAt(s, cx, cy)) >= 0 && !s.board[j]) { cx += k * ax; cy += k * ay; dist++; }
+    while ((j = sqFlat(s, cx, cy)) >= 0 && !s.board[j]) { cx += k * ax; cy += k * ay; dist++; }
     if (j < 0) continue;
     const r = s.board[j];
     if (r.p !== p || r.t !== 'R' || r.m || dist < 3) continue;
     if (inCheckNow === null) inCheckNow = attacked(s, i, p);
     if (inCheckNow) return;
-    const a = sqAt(s, x + k * ax, y + k * ay), b = sqAt(s, x + 2 * k * ax, y + 2 * k * ay);
+    const a = sqFlat(s, x + k * ax, y + k * ay), b = sqFlat(s, x + 2 * k * ax, y + 2 * k * ay);
     if (attacked(s, a, p) || attacked(s, b, p)) continue;
     out.push({ from: i, to: b, castle: { from: j, to: a } });
   }
@@ -228,9 +274,10 @@ export function attackedBy(s, i, isAttacker) {
     const t = board[j];
     if (t && t.t === 'K' && isAttacker(t.p)) return true;
   }
+  const len = rayLen(s);
   for (const [dirs, a, b] of [[ORTHO, 'R', 'Q'], [DIAG, 'B', 'Q']]) {
     for (const [dx, dy] of dirs) {
-      for (let cx = x + dx, cy = y + dy; ; cx += dx, cy += dy) {
+      for (let k = 1, cx = x + dx, cy = y + dy; k <= len; k++, cx += dx, cy += dy) {
         const j = sqAt(s, cx, cy);
         if (j < 0) break;
         const t = board[j];
@@ -250,6 +297,12 @@ export function attackedBy(s, i, isAttacker) {
       const t = board[j];
       if (t && t.t === 'P' && t.p === q) return true;
     }
+  }
+  // A non-pawn piece on the twin wormhole can warp here.
+  const j = s.warp[i];
+  if (j >= 0) {
+    const t = board[j];
+    if (t && t.t !== 'P' && isAttacker(t.p)) return true;
   }
   return false;
 }
@@ -324,6 +377,28 @@ export function legalMoves(s, p = s.turn, capturesOnly = false) {
     unmakeMove(s, u);
   }
   return out;
+}
+
+// The (dx, dy) a move travels on screen. On a wrapped board a slide may cross the seam, so take
+// the shortest direction whose path is actually clear (call this before making the move).
+export function travel(s, mv) {
+  const fx = mv.from % s.w, fy = (mv.from - fx) / s.w, tx = mv.to % s.w, ty = (mv.to - tx) / s.w;
+  const dy = ty - fy, dx = tx - fx;
+  if (!s.mode.wrap || mv.warp || mv.castle) return [dx, dy];
+  const options = [dx, dx - s.w, dx + s.w].sort((a, b) => Math.abs(a) - Math.abs(b));
+  const pc = s.board[mv.from];
+  if (!pc || !'RBQ'.includes(pc.t)) return [options[0], dy];
+  for (const ox of options) {
+    if (!(ox === 0 || dy === 0 || Math.abs(ox) === Math.abs(dy))) continue;
+    const n = Math.max(Math.abs(ox), Math.abs(dy)), sx = Math.sign(ox), sy = Math.sign(dy);
+    let clear = true;
+    for (let k = 1; k < n && clear; k++) {
+      const j = sqAt(s, fx + k * sx, fy + k * sy);
+      clear = j >= 0 && !s.board[j];
+    }
+    if (clear) return [ox, dy];
+  }
+  return [options[0], dy];
 }
 
 export function positionKey(s) {

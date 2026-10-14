@@ -1,17 +1,15 @@
-// MindGame computer opponents.
-// Two-player modes use iterative-deepening alpha-beta (negamax + quiescence).
-// Four Kingdoms uses a shallow threat-aware search: look at my move, then at what the others can grab back.
+// Space Chess computer opponents: iterative-deepening alpha-beta (negamax + quiescence).
+// Wormholes, black holes and orbit wrap all live in the engine's move generator, so the
+// search plays them without knowing about them.
 
-import {
-  VALUE, cloneState, legalMoves, pseudoMoves, makeMove, unmakeMove, inCheck, attackedBy, relRank,
-} from './engine.js';
+import { VALUE, cloneState, legalMoves, makeMove, unmakeMove, inCheck, relRank } from './engine.js';
 
 export const LEVELS = [
-  { id: 'novice', name: 'Novice', depth: 1, noise: 350, time: 400 },
-  { id: 'easy',   name: 'Easy',   depth: 1, noise: 80,  time: 600 },
-  { id: 'medium', name: 'Medium', depth: 2, noise: 25,  time: 1500 },
-  { id: 'hard',   name: 'Hard',   depth: 3, noise: 0,   time: 2500 },
-  { id: 'master', name: 'Master', depth: 6, noise: 0,   time: 3500 },
+  { id: 'cadet',    name: 'Cadet',    depth: 1, noise: 350, time: 400 },
+  { id: 'pilot',    name: 'Pilot',    depth: 1, noise: 80,  time: 600 },
+  { id: 'captain',  name: 'Captain',  depth: 2, noise: 25,  time: 1500 },
+  { id: 'admiral',  name: 'Admiral',  depth: 3, noise: 0,   time: 2500 },
+  { id: 'overlord', name: 'Overlord', depth: 6, noise: 0,   time: 3500 },
 ];
 
 const MATE = 1e6;
@@ -22,42 +20,41 @@ export function chooseMove(s0, levelId, rand = Math.random) {
   const s = cloneState(s0);
   const moves = legalMoves(s);
   if (moves.length <= 1) return moves[0] || null;
-  return s.n === 2 ? searchDuel(s, moves, lv, rand) : searchMulti(s, moves, lv, rand);
+  return searchDuel(s, moves, lv, rand);
 }
 
 // ---------- evaluation ----------
 
+// On a wrapped (cylinder) board every file is as central as any other, so only the rank counts.
+function centrality(s, x, y) {
+  const cx = (s.w - 1) / 2, cy = (s.h - 1) / 2;
+  return s.mode.wrap
+    ? Math.max(0, 6 - 2 * Math.abs(y - cy))
+    : Math.max(0, 6 - (Math.abs(x - cx) + Math.abs(y - cy)));
+}
+
 function pieceScore(s, c, i) {
   const x = i % s.w, y = (i - x) / s.w;
-  const cx = (s.w - 1) / 2, cy = (s.h - 1) / 2;
-  const centre = Math.max(0, 6 - (Math.abs(x - cx) + Math.abs(y - cy)));
+  const centre = centrality(s, x, y);
   let v = VALUE[c.t];
+  // A ship on a wormhole has a long reach; a Commander on one can be checked from the far end.
+  if (s.warp[i] >= 0) v += c.t === 'K' ? -30 : c.t === 'P' ? 0 : 15;
   switch (c.t) {
     case 'N': v += centre * 6; break;
     case 'B': v += centre * 4; break;
     case 'Q': v += centre * 2; break;
     case 'R': v += centre; break;
     case 'P': v += relRank(s, c.p, x, y) * 8 + centre * 2; break;
-    case 'K': v += s.mode.hill ? centre * 30 : -centre * 3; break;
+    case 'K': v -= centre * 3; break;
   }
   return v;
 }
 
-function totals(s) {
-  const t = new Array(s.n).fill(0);
-  s.board.forEach((c, i) => { if (c) t[c.p] += pieceScore(s, c, i); });
-  return t;
-}
-
-// Score from player p's point of view: own material minus the average opponent.
+// Score from player p's point of view: own material and placement minus the opponent's.
 function evaluate(s, p) {
-  const t = totals(s);
-  let others = 0, k = 0;
-  for (let q = 0; q < s.n; q++) {
-    if (q === p || !s.alive[q] || s.kings[q] < 0) continue;
-    others += t[q]; k++;
-  }
-  return t[p] - (k ? others / k : 0);
+  let v = 0;
+  s.board.forEach((c, i) => { if (c) v += c.p === p ? pieceScore(s, c, i) : -pieceScore(s, c, i); });
+  return v;
 }
 
 function orderMoves(s, moves, first) {
@@ -74,16 +71,11 @@ function orderMoves(s, moves, first) {
   return moves.map(mv => [score(mv), mv]).sort((a, b) => b[0] - a[0]).map(e => e[1]);
 }
 
-// ---------- two-player search ----------
-
-function onHill(s, p) {
-  return s.mode.hill && s.mode.hill.includes(s.kings[p]);
-}
+// ---------- search ----------
 
 function quiesce(s, alpha, beta, ply, ctx, qd) {
   if ((++ctx.nodes & 1023) === 0 && ctx.canAbort && Date.now() > ctx.deadline) throw ABORT;
   const me = s.turn;
-  if (onHill(s, 1 - me)) return -MATE + ply;
   const stand = evaluate(s, me);
   if (stand >= beta) return stand;
   if (stand > alpha) alpha = stand;
@@ -101,7 +93,6 @@ function quiesce(s, alpha, beta, ply, ctx, qd) {
 function negamax(s, depth, alpha, beta, ply, ctx) {
   if ((++ctx.nodes & 1023) === 0 && ctx.canAbort && Date.now() > ctx.deadline) throw ABORT;
   const me = s.turn;
-  if (onHill(s, 1 - me)) return -MATE + ply;
   if (depth <= 0) return quiesce(s, alpha, beta, ply, ctx, 0);
   const moves = legalMoves(s);
   if (!moves.length) return inCheck(s, me) ? -MATE + ply : 0;
@@ -141,46 +132,6 @@ function searchDuel(s, moves, lv, rand) {
       break;
     }
     if (Date.now() > ctx.deadline) break;
-  }
-  return best;
-}
-
-// ---------- multiplayer search ----------
-
-// The most player q could win by capturing one of `me`'s pieces right now.
-function worstGrab(s, q, me) {
-  let worst = 0;
-  for (const c of pseudoMoves(s, q, true)) {
-    const victim = s.board[c.epCap ?? c.to];
-    if (victim.p !== me) continue;
-    if (victim.t === 'K') return 1e5;
-    const attacker = s.board[c.from];
-    const defended = attackedBy(s, c.to, o => o === me);
-    worst = Math.max(worst, VALUE[victim.t] - (defended ? VALUE[attacker.t] : 0));
-  }
-  return worst;
-}
-
-function searchMulti(s, moves, lv, rand) {
-  const me = s.turn;
-  let best = moves[0], bestV = -Infinity;
-  for (const mv of moves) {
-    const victim = mv.cap ? s.board[mv.epCap ?? mv.to] : null;
-    const u = makeMove(s, mv);
-    let v = evaluate(s, me);
-    if (victim && victim.t === 'K') v += 1e5;
-    if (lv.depth >= 2) {
-      for (let q = 0; q < s.n; q++) {
-        if (q === me || !s.alive[q] || s.kings[q] < 0) continue;
-        const weight = q === s.turn ? 1 : lv.depth >= 3 ? 0.6 : 0;
-        if (weight) v -= weight * worstGrab(s, q, me);
-      }
-      // Reward checkmating the next player (they'd be knocked out).
-      if (lv.depth >= 3 && inCheck(s, s.turn) && !legalMoves(s).length) v += 5000;
-    }
-    unmakeMove(s, u);
-    v += (rand() * 2 - 1) * lv.noise;
-    if (v > bestV) { bestV = v; best = mv; }
   }
   return best;
 }

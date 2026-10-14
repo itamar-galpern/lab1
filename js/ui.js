@@ -1,6 +1,6 @@
-// MindGame UI: menu, setup, 3D board rendering, input, and driving the AI worker.
+// Space Chess UI: main menu, rules, board rendering, input, and driving the AI worker.
 
-import { MODES, GLOBAL_RULES } from './modes.js';
+import { SPACE, PIECES, BLACK_HOLES, WORMHOLES } from './space.js';
 import { Game } from './game.js';
 import { LEVELS, chooseMove } from './ai.js';
 import { snapshot } from './engine.js';
@@ -30,51 +30,70 @@ let pending = null; // { token, started } for the AI move in flight
 
 // ---------- menu ----------
 
-function renderMenu() {
-  $('#global-rules').innerHTML = GLOBAL_RULES.map(r => `<li>${r}</li>`).join('');
-  const box = $('#mode-cards');
-  box.innerHTML = '';
-  for (const mode of MODES) {
-    const card = el('article', 'mode card');
-    const dots = mode.players.map(p => `<i style="background:${p.color}"></i>`).join('');
-    card.innerHTML = `
-      <h3>${mode.name}</h3>
-      <div class="tag">${mode.tagline}</div>
-      <div class="chips">
-        <span class="chip"><span class="dots">${dots}</span> ${mode.players.length} players</span>
-        <span class="chip">${mode.w}×${mode.h} board</span>
-      </div>
-      <ul>${mode.rules.map(r => `<li>${r}</li>`).join('')}</ul>`;
-    const btn = el('button', 'primary', 'Play ' + mode.name);
-    btn.onclick = () => openSetup(mode);
-    card.append(btn);
-    box.append(card);
-  }
+const RULES = [
+  `<b>${SPACE.players[0].fleet}</b> (gold) moves first. <b>${SPACE.players[1].fleet}</b> (teal) moves second.`,
+  'Checkmate the enemy Commander to win. You may never leave your own Commander in check.',
+  `<b>Black holes</b> (${BLACK_HOLES.join(', ')}): these squares are gone. Nothing can land on them or fly through them.`,
+  `<b>Wormhole</b> (${WORMHOLES.map(w => w.join(' ↔ ')).join(', ')}): any ship except an Astronaut standing on one end may warp to the other end as its move, capturing an enemy there. Ships attack through the wormhole too.`,
+  '<b>Orbit</b>: the left and right edges of the board are joined. A ship sliding off the a-file comes back on the h-file (and the other way around). Docking (castling) never crosses the edge.',
+  'Astronauts reaching the far rank are promoted. Docking and en passant work like in normal chess.',
+  'Draws: stalemate, 50 moves without a capture or Astronaut move, threefold repetition, or only Commanders left.',
+];
+
+function openRules() {
+  const d = dialog();
+  d.classList.add('wide');
+  const pieces = Object.entries(PIECES).map(([t, pc]) =>
+    `<li><span class="g">${glyph(t)}</span> <b>${pc.name}</b> <small>(${pc.classic})</small>: ${pc.move}</li>`).join('');
+  d.innerHTML = `<h2>Rules</h2><ul class="rules">${RULES.map(r => `<li>${r}</li>`).join('')}</ul>
+    <h3>The fleet</h3><ul class="rules pieces">${pieces}</ul>`;
+  const actions = el('div', 'actions');
+  const back = el('button', 'primary', 'Back');
+  back.onclick = closeDialog;
+  actions.append(back);
+  d.append(actions);
 }
 
-function openSetup(mode) {
+function openPlay() {
   const d = dialog();
-  d.innerHTML = `<h2>${mode.name}</h2><p>Who controls each army?</p>`;
-  const options = [['human', 'Human'], ...LEVELS.map(l => [l.id, `Computer — ${l.name}`])];
-  const selects = mode.players.map((pl, i) => {
-    const row = el('div', 'row');
-    row.innerHTML = `<span class="sw" style="background:${pl.color}"></span><label>${pl.name}</label>`;
-    const sel = el('select');
-    sel.innerHTML = options.map(([v, t]) => `<option value="${v}">${t}</option>`).join('');
-    sel.value = i === 0 ? 'human' : 'medium';
-    row.append(sel);
-    d.append(row);
-    return sel;
-  });
+  d.innerHTML = '<h2>Play</h2><p>Who are you playing against?</p>';
+  const choice = el('div', 'actions stack');
+  const ai = el('button', 'primary big', 'vs Computer');
+  ai.onclick = openAISetup;
+  const human = el('button', 'big', 'vs Human <small>(same device)</small>');
+  human.onclick = () => { closeDialog(); startGame(['human', 'human']); };
+  const back = el('button', '', 'Back');
+  back.onclick = closeDialog;
+  choice.append(ai, human, back);
+  d.append(choice);
+}
+
+function openAISetup() {
+  const d = dialog();
+  d.innerHTML = '<h2>vs Computer</h2>';
+  const sideRow = el('div', 'row');
+  sideRow.innerHTML = '<label>Your fleet</label>';
+  const side = el('select');
+  side.innerHTML = SPACE.players.map((pl, i) => `<option value="${i}">${pl.fleet}${i === 0 ? ' (moves first)' : ''}</option>`).join('');
+  sideRow.append(side);
+  const lvRow = el('div', 'row');
+  lvRow.innerHTML = '<label>Difficulty</label>';
+  const level = el('select');
+  level.innerHTML = LEVELS.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
+  level.value = 'captain';
+  lvRow.append(level);
+  d.append(sideRow, lvRow);
   const actions = el('div', 'actions');
-  const cancel = el('button', '', 'Back');
-  cancel.onclick = closeDialog;
-  const start = el('button', 'primary', 'Start game');
+  const back = el('button', '', 'Back');
+  back.onclick = openPlay;
+  const start = el('button', 'primary', 'Launch');
   start.onclick = () => {
+    const ctrls = ['human', 'human'];
+    ctrls[1 - +side.value] = level.value;
     closeDialog();
-    startGame(mode, selects.map(s => s.value));
+    startGame(ctrls);
   };
-  actions.append(cancel, start);
+  actions.append(back, start);
   d.append(actions);
 }
 
@@ -83,6 +102,7 @@ function openSetup(mode) {
 function dialog() {
   $('#overlay').classList.remove('hidden');
   const d = $('#dialog');
+  d.className = 'dialog card';
   d.innerHTML = '';
   return d;
 }
@@ -93,13 +113,15 @@ function closeDialog() {
 
 // ---------- game ----------
 
-function startGame(mode, ctrls) {
+function startGame(ctrls) {
+  const mode = SPACE;
   cancelAI();
   game = new Game(mode);
   controllers = ctrls;
   selected = -1;
   targets = [];
-  setRot(0);
+  // Face the board from the human's side (Nebula sits at the top, so turn it around).
+  setRot(ctrls[0] !== 'human' && ctrls[1] === 'human' ? 180 : 0);
   $('#menu').classList.add('hidden');
   $('#game').classList.remove('hidden');
   $('#game-title').textContent = mode.name;
@@ -113,14 +135,16 @@ function buildBoard() {
   const board = $('#board');
   board.innerHTML = '';
   board.style.setProperty('--w', mode.w);
-  $('#board-wrap').classList.toggle('rect', !mode.holes);
+  $('#board-wrap').classList.add('rect');
   squares = [];
   for (let y = 0; y < mode.h; y++) {
     for (let x = 0; x < mode.w; x++) {
       const i = y * mode.w + x;
       const sq = el('div', 'sq ' + ((x + y) % 2 ? 'dark' : 'light'));
       if (!game.s.valid[i]) sq.classList.add('hole');
-      if (mode.hill && mode.hill.includes(i)) sq.classList.add('hill');
+      if (game.s.warp[i] >= 0) sq.classList.add('wormhole');
+      if (x === 0) sq.classList.add('seam-l');
+      if (x === mode.w - 1) sq.classList.add('seam-r');
       sq.dataset.i = i;
       board.append(sq);
       squares.push(sq);
@@ -203,8 +227,7 @@ function renderPanel() {
   const log = $('#move-log');
   log.innerHTML = game.log.map(e => {
     const pl = mode.players[e.p];
-    const notes = e.notes.map(n => `<span class="note">${n.text}</span>`).join('');
-    return `<li style="${pcVars(pl)}"><span class="mv">${pl.name}</span> ${e.text}${notes}</li>`;
+    return `<li style="${pcVars(pl)}"><span class="mv">${pl.name}</span> ${e.text}</li>`;
   }).join('');
   log.scrollTop = log.scrollHeight;
 
@@ -234,11 +257,12 @@ function onSquareClick(i) {
 function choosePromotion(options) {
   const pl = game.mode.players[game.turn];
   const d = dialog();
-  d.innerHTML = '<h2>Promote pawn</h2><p>Choose a new piece.</p>';
+  d.innerHTML = '<h2>Promote Astronaut</h2><p>Choose a new ship.</p>';
   const row = el('div', 'promo');
   row.style.cssText = pcVars(pl);
   for (const mv of options) {
     const b = el('button', '', glyph(mv.promo));
+    b.title = PIECES[mv.promo].name;
     b.onclick = () => { closeDialog(); doMove(mv); };
     row.append(b);
   }
@@ -270,7 +294,7 @@ function showResult() {
   const menu = el('button', '', 'Menu');
   menu.onclick = () => { closeDialog(); toMenu(); };
   const again = el('button', 'primary', 'Play again');
-  again.onclick = () => { closeDialog(); startGame(mode, controllers); };
+  again.onclick = () => { closeDialog(); startGame(controllers); };
   actions.append(view, menu, again);
   d.append(actions);
 }
@@ -346,7 +370,9 @@ $('#board').addEventListener('click', e => {
   if (sq) onSquareClick(+sq.dataset.i);
 });
 $('#btn-menu').onclick = toMenu;
-$('#btn-restart').onclick = () => startGame(game.mode, controllers);
+$('#btn-restart').onclick = () => startGame(controllers);
+$('#btn-play').onclick = openPlay;
+$('#btn-rules').onclick = openRules;
 $('#btn-undo').onclick = () => {
   cancelAI();
   // Step back to the most recent position where a human was to move.
@@ -363,8 +389,6 @@ $('#tilt').oninput = e => {
   fitBoard();
 };
 $('#overlay').addEventListener('click', e => {
-  if (e.target.id === 'overlay' && game && game.result) closeDialog();
+  if (e.target.id === 'overlay' && (!game || game.result)) closeDialog();
 });
 addEventListener('resize', fitBoard);
-
-renderMenu();

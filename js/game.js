@@ -1,9 +1,8 @@
 // Game controller: applies moves, tracks history for undo, and decides results
-// (checkmate, stalemate, draws, King of the Hill, Four Kingdoms eliminations).
+// (checkmate, stalemate and draws).
 
-import {
-  createState, cloneState, legalMoves, makeMove, inCheck, nextAlive, positionKey, sqName,
-} from './engine.js';
+import { createState, cloneState, legalMoves, makeMove, inCheck, positionKey, sqName } from './engine.js';
+import { PIECES } from './space.js';
 
 export class Game {
   constructor(mode) {
@@ -23,8 +22,6 @@ export class Game {
 
   checked() { return !this.result && inCheck(this.s, this.s.turn); }
 
-  aliveCount() { return this.s.alive.filter(Boolean).length; }
-
   countPosition() {
     const k = positionKey(this.s);
     const c = (this.reps.get(k) || 0) + 1;
@@ -32,6 +29,7 @@ export class Game {
     return c;
   }
 
+  // Applies a legal move and returns the undo record (it names the captured piece, if any).
   play(mv) {
     const s = this.s;
     this.history.push({
@@ -42,56 +40,24 @@ export class Game {
     const text = this.describe(mv);
     const u = makeMove(s, mv);
     this.lastMove = mv;
-    const notes = [];
-
-    if (u.cap && u.cap.t === 'K') this.eliminate(u.cap.p, notes, 'lost their king');
-
-    if (!this.result && this.mode.hill && u.pc.t === 'K' && this.mode.hill.includes(mv.to)) {
-      this.result = { winner: mover, reason: 'reached the Hill' };
-    }
-    if (!this.result) this.resolveTurn(notes);
+    this.resolveTurn();
 
     let suffix = '';
-    if (this.result && this.result.winner === mover && this.result.reason === 'checkmate') suffix = '#';
+    if (this.result && this.result.reason === 'checkmate') suffix = '#';
     else if (!this.result && inCheck(s, s.turn)) suffix = '+';
-    this.log.push({ p: mover, text: text + suffix, notes });
-    return notes;
+    this.log.push({ p: mover, text: text + suffix, cap: u.cap ? u.cap.t : null, warp: !!mv.warp });
+    return u;
   }
 
-  // Finds the next player who can move, knocking out stuck players in multiplayer.
-  resolveTurn(notes) {
+  resolveTurn() {
     const s = this.s;
-    for (;;) {
-      if (this.aliveCount() === 1) {
-        this.result = { winner: s.alive.indexOf(true), reason: 'last king standing' };
-        return;
-      }
-      if (legalMoves(s).length) break;
-      const check = inCheck(s, s.turn);
-      if (s.n === 2) {
-        this.result = check
-          ? { winner: 1 - s.turn, reason: 'checkmate' }
-          : { winner: null, reason: 'stalemate' };
-        return;
-      }
-      this.eliminate(s.turn, notes, check ? 'was checkmated' : 'was stalemated');
-    }
-    const limit = s.n === 2 ? 100 : 200;
-    if (s.halfmove >= limit) this.result = { winner: null, reason: `${limit / 2}-move rule` };
+    if (!legalMoves(s).length) {
+      this.result = inCheck(s, s.turn)
+        ? { winner: 1 - s.turn, reason: 'checkmate' }
+        : { winner: null, reason: 'stalemate' };
+    } else if (s.halfmove >= 100) this.result = { winner: null, reason: '50-move rule' };
     else if (this.countPosition() >= 3) this.result = { winner: null, reason: 'threefold repetition' };
-    else if (s.board.every(c => !c || c.t === 'K')) this.result = { winner: null, reason: 'only kings left' };
-  }
-
-  eliminate(p, notes, why) {
-    const s = this.s;
-    s.alive[p] = false;
-    s.kings[p] = -1;
-    s.board.forEach((c, i) => { if (c && c.p === p) s.board[i] = null; });
-    if (s.turn === p) s.turn = nextAlive(s, p);
-    notes.push({ p, text: `${this.mode.players[p].name} ${why} and is out!` });
-    if (this.aliveCount() === 1) {
-      this.result = { winner: s.alive.indexOf(true), reason: 'last king standing' };
-    }
+    else if (s.board.every(c => !c || c.t === 'K')) this.result = { winner: null, reason: 'only Commanders left' };
   }
 
   undo() {
@@ -105,13 +71,13 @@ export class Game {
     return true;
   }
 
+  // Move text with space names, in plain ASCII for the pixel fonts:
+  // "Rocket b1-c3", "Comet c1xh6", "Station b3~g6" (a warp), "Astronaut e7-e8=Flagship".
   describe(mv) {
     const s = this.s, pc = s.board[mv.from];
-    if (mv.castle) {
-      const dist = Math.abs(mv.castle.from - mv.from) % s.w || Math.abs(mv.castle.from - mv.from) / s.w;
-      return dist > 3 ? 'O-O-O' : 'O-O';
-    }
-    const letter = pc.t === 'P' ? '' : pc.t;
-    return `${letter}${sqName(s, mv.from)}${mv.cap ? '×' : '–'}${sqName(s, mv.to)}${mv.promo ? '=' + mv.promo : ''}`;
+    if (mv.castle) return Math.abs(mv.castle.from - mv.from) > 3 ? 'Dock O-O-O' : 'Dock O-O';
+    const sep = (mv.warp ? '~' : '') + (mv.cap ? 'x' : mv.warp ? '' : '-');
+    const promo = mv.promo ? '=' + PIECES[mv.promo].name : '';
+    return `${PIECES[pc.t].name} ${sqName(s, mv.from)}${sep}${sqName(s, mv.to)}${promo}`;
   }
 }
