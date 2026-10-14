@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MindGame</title>
+  <meta name="description" content="MindGame — chess reimagined in 3D, with new game modes, a bolder knight and computer opponents.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Main menu: every mode with its full rules -->
+  <main id="menu" class="screen">
+    <header class="hero">
+      <div class="logo" aria-hidden="true"><span class="b">♞&#xFE0E;</span><span class="p">♚&#xFE0E;</span></div>
+      <h1>Mind<span>Game</span></h1>
+      <p class="sub">Chess, reimagined. Pick a mode, read the rules, and play a friend or the computer.</p>
+    </header>
+
+    <section class="rules-all card">
+      <h2>Rules in every mode</h2>
+      <ul id="global-rules"></ul>
+    </section>
+
+    <section id="mode-cards" class="modes"></section>
+    <footer class="foot">Blue pieces = classic White · Pink pieces = classic Black</footer>
+  </main>
+
+  <!-- Game -->
+  <div id="game" class="screen hidden">
+    <div class="topbar">
+      <button id="btn-menu" class="ghost">← Menu</button>
+      <h2 id="game-title"></h2>
+      <div class="spacer"></div>
+    </div>
+    <div class="layout">
+      <div id="stage" class="stage">
+        <div id="board-wrap" class="board-wrap">
+          <div id="board" class="board"></div>
+          <div class="edge edge-front"></div>
+        </div>
+      </div>
+      <aside class="panel">
+        <div id="status" class="status"></div>
+        <ul id="player-list" class="players"></ul>
+        <div class="controls">
+          <button id="btn-undo">↶ Undo</button>
+          <button id="btn-restart">↻ Restart</button>
+          <button id="btn-rotl" title="Rotate view left">⟲</button>
+          <button id="btn-rotr" title="Rotate view right">⟳</button>
+        </div>
+        <label class="tilt">3D tilt <input id="tilt" type="range" min="0" max="60" value="45"></label>
+        <h3>Moves</h3>
+        <ol id="move-log" class="log"></ol>
+      </aside>
+    </div>
+  </div>
+
+  <!-- Dialogs -->
+  <div id="overlay" class="overlay hidden">
+    <div id="dialog" class="dialog card"></div>
+  </div>
+
+  <script type="module" src="js/ui.js"></script>
+</body>
+</html>
