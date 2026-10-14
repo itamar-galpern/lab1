@@ -4,8 +4,9 @@ import { sq, sqName, isHole, warpTwin, START, BLACK_HOLES } from '../js/rules.js
 import {
   newState, fromFEN, toFEN, legalMoves, makeMove, unmakeMove, inCheck, pieceAt, kingSquare,
   serialize, deserialize, positionKey, perft,
+  VOID, isVoid, twinOf, features, setVoid, linkWormhole, unlinkWormhole,
 } from '../js/engine.js';
-import { Game } from '../js/game.js';
+import { Game, EVENT_EVERY } from '../js/game.js';
 
 const movesFrom = (s, a) => legalMoves(s).filter(m => m.from === sq(a));
 const targets = (s, a) => movesFrom(s, a).map(m => sqName(m.to)).sort();
@@ -386,4 +387,257 @@ test('random games: no duplicate moves, nothing enters a black hole, vx/vy match
     assert.equal(positionKey(s), startKey);
     assert.equal(toFEN(s), toFEN(newState()));
   }
+});
+
+// ---------- instant wormhole transit ----------
+
+// Everything about a position that must come back exactly after an undo.
+const snapshot = s => JSON.stringify([serialize(s), positionKey(s), s.kings, toFEN(s)]);
+
+test('a ship landing on a wormhole is flung out of the other end', () => {
+  const s = fromFEN('3k4/8/8/8/3N4/8/8/4K3 w - - 0 1');
+  const before = snapshot(s);
+  const m = one(s, 'd4', 'b3');
+  assert.deepEqual([m.kind, m.transit, m.vx, m.vy], ['move', sq('g6'), -2, 1]);
+  makeMove(s, m);
+  assert.deepEqual(pieceAt(s, sq('g6')), { type: 'N', side: 0 });
+  assert.equal(pieceAt(s, sq('b3')), null);
+  assert.equal(positionKey(s), positionKey(deserialize(serialize(s))));
+  unmakeMove(s);
+  assert.equal(snapshot(s), before);
+});
+
+test('a transit can capture on the way in, give check, and is written with ~', () => {
+  let g = new Game('6k1/8/8/8/8/8/8/1R2K3 w - - 0 1');
+  const r = play(g, 'b1', 'b3');
+  assert.equal(r.text, 'Station b1-b3~g6+');
+  assert.ok(r.check);
+  g = new Game('3k4/8/8/8/8/1n6/8/1R2K3 w - - 0 1');
+  assert.equal(play(g, 'b1', 'b3').text, 'Station b1xb3~g6');
+  assert.deepEqual(g.pieceAt(sq('g6')), { type: 'R', side: 0 });
+  assert.deepEqual(g.captured[0], ['N']);
+  g.undo();
+  assert.deepEqual(g.pieceAt(sq('b3')), { type: 'N', side: 1 });
+  assert.deepEqual(g.pieceAt(sq('b1')), { type: 'R', side: 0 });
+});
+
+test('a Commander transits too, and its square is tracked', () => {
+  const s = fromFEN('3k4/8/8/8/K7/8/8/8 w - - 0 1');
+  const m = one(s, 'a4', 'b3');
+  assert.equal(m.transit, sq('g6'));
+  makeMove(s, m);
+  assert.equal(kingSquare(s, 0), sq('g6'));
+  unmakeMove(s);
+  assert.equal(kingSquare(s, 0), sq('a4'));
+});
+
+test('no transit when the exit is occupied: the ship parks, and can warp later', () => {
+  const g = new Game('3k4/8/6p1/8/3N4/8/8/4K3 w - - 0 1');
+  assert.equal(one(g.state, 'd4', 'b3').transit, -1);
+  assert.equal(play(g, 'd4', 'b3').text, 'Rocket d4-b3');
+  assert.deepEqual(g.pieceAt(sq('b3')), { type: 'N', side: 0 });
+  play(g, 'd8', 'c8');
+  const w = one(g.state, 'b3', 'g6');
+  assert.deepEqual([w.kind, w.cap, w.transit], ['warp', 'P', -1]);
+});
+
+test('no transit back to the square the ship just left', () => {
+  const s = fromFEN('3k4/8/6B1/8/8/8/8/4K3 w - - 0 1');
+  const m = one(s, 'g6', 'b3');   // g6-h5-a4-b3 round the orbit
+  assert.deepEqual([m.kind, m.transit], ['move', -1]);
+  makeMove(s, m);
+  assert.deepEqual(pieceAt(s, sq('b3')), { type: 'B', side: 0 });
+});
+
+test('Astronauts never transit', () => {
+  const s = newState();
+  const m = one(s, 'b2', 'b3');
+  assert.equal(m.transit, -1);
+  makeMove(s, m);
+  assert.deepEqual(pieceAt(s, sq('b3')), { type: 'P', side: 0 });
+  assert.equal(pieceAt(s, sq('g6')), null);
+});
+
+test('checkmate by transit', () => {
+  const g = new Game('6rk/6nr/8/8/3N4/8/8/4K3 w - - 0 1');
+  const r = play(g, 'd4', 'b3');
+  assert.equal(r.text, 'Rocket d4-b3~g6#');
+  assert.deepEqual(g.result, { winner: 0, reason: 'checkmate' });
+});
+
+// ---------- the layout API ----------
+
+test('voids and wormholes can change between moves, and the hash follows', () => {
+  const s = newState(), start = positionKey(s);
+  assert.deepEqual(features(s), { voids: [sq('c5'), sq('f4')], wormholes: [[sq('g6'), sq('b3')]] });
+  assert.ok(isVoid(s, sq('c5')) && !isVoid(s, sq('d4')));
+  assert.equal(twinOf(s, sq('b3')), sq('g6'));
+  assert.equal(s.board[sq('c5')], VOID);
+  assert.equal(pieceAt(s, sq('c5')), null);
+
+  setVoid(s, sq('d4'), true);
+  assert.notEqual(positionKey(s), start);
+  assert.equal(positionKey(s), positionKey(deserialize(serialize(s))));
+  linkWormhole(s, sq('e3'), sq('d6'));
+  assert.equal(twinOf(s, sq('d6')), sq('e3'));
+  assert.equal(positionKey(s), positionKey(deserialize(serialize(s))));
+  assert.equal(s.keys[s.keys.length - 1], positionKey(s));
+  unlinkWormhole(s, sq('d6'));
+  setVoid(s, sq('d4'), false);
+  assert.equal(positionKey(s), start);
+  assert.throws(() => setVoid(s, sq('e2'), true), /not empty/);
+  assert.throws(() => linkWormhole(s, sq('b3'), sq('e5')), /cannot link/);
+});
+
+test('a new void stops sliders and pawns, but Rockets leap over it', () => {
+  const s = fromFEN('3k4/8/8/8/8/8/3P4/3RK1N1 w - - 0 1');
+  setVoid(s, sq('d3'), true);
+  assert.equal(find(s, 'd2', 'd3').length, 0);
+  assert.equal(find(s, 'd2', 'd4').length, 0);
+  setVoid(s, sq('f3'), true);
+  assert.ok(targets(s, 'g1').includes('e2') && targets(s, 'g1').includes('h3') && !targets(s, 'g1').includes('f3'));
+  const t = fromFEN('3k4/8/8/8/8/8/8/3RK3 w - - 0 1');
+  setVoid(t, sq('d4'), true);
+  assert.deepEqual(targets(t, 'd1').filter(x => x[0] === 'd'), ['d2', 'd3']);
+});
+
+test('serialize / deserialize keeps a changed layout', () => {
+  const s = newState();
+  setVoid(s, sq('e4'), true);
+  linkWormhole(s, sq('a5'), sq('h4'));
+  unlinkWormhole(s, sq('b3'));
+  const copy = deserialize(JSON.parse(JSON.stringify(serialize(s))));
+  assert.deepEqual(features(copy), features(s));
+  assert.equal(positionKey(copy), positionKey(s));
+  const names = st => legalMoves(st).map(m => `${m.from}-${m.to}-${m.transit}`).sort();
+  assert.deepEqual(names(copy), names(s));
+});
+
+// ---------- cosmic events ----------
+
+// Plays deterministic pseudo-random moves; returns the play() results.
+function playRandom(g, plies, rand) {
+  const out = [];
+  for (let k = 0; k < plies && !g.result; k++) {
+    const ms = g.moves();
+    out.push(g.play(ms[Math.floor(rand() * ms.length)]));
+  }
+  return out;
+}
+
+const NEW_EVENTS = ['drift', 'wormhole-open', 'meteor'];
+
+test('cosmic events fire after every 10th ply, on empty middle squares', () => {
+  let checked = 0;
+  for (let seed = 1; checked < 5 && seed < 60; seed++) {
+    const g = new Game(null, { cosmic: true, seed });
+    assert.equal(g.nextEvent, EVENT_EVERY);
+    const rand = mulberry(seed);
+    const before = [];
+    const results = [];
+    for (let k = 0; k < 20 && !g.result; k++) {
+      before.push(g.board().map(p => !!p));
+      const ms = g.moves();
+      results.push(g.play(ms[Math.floor(rand() * ms.length)]));
+    }
+    if (results.length < 20) continue;
+    checked++;
+    results.forEach((r, k) => {
+      const fresh = r.events.filter(e => NEW_EVENTS.includes(e.type));
+      assert.equal(fresh.length, (k + 1) % EVENT_EVERY === 0 ? 1 : 0, `ply ${k + 1}`);
+      for (const e of fresh) {
+        const squares = e.type === 'drift' ? [e.to] : e.type === 'meteor' ? e.squares : [e.a, e.b];
+        for (const i of squares) {
+          assert.ok((i >> 3) >= 2 && (i >> 3) <= 5, `${e.type} outside ranks 3-6`);
+          assert.equal(g.log[k].events.includes(e), true);
+        }
+        assert.ok(typeof e.text === 'string' && e.text.length > 10);
+      }
+    });
+    assert.equal(g.nextEvent, EVENT_EVERY);
+  }
+  assert.equal(checked, 5);
+});
+
+// Finds a seeded cosmic game whose first event (ply 10) has the given type.
+function gameWithFirstEvent(type) {
+  for (let seed = 1; seed < 400; seed++) {
+    const g = new Game(null, { cosmic: true, seed }), rand = mulberry(seed * 7 + 1);
+    const rs = playRandom(g, 10, rand);
+    if (rs.length === 10 && rs[9].events.some(e => e.type === type)) return { g, rand };
+  }
+  throw new Error('no game with a ' + type);
+}
+
+test('meteor debris clears after 6 plies, temporary wormholes close after 12', () => {
+  let { g, rand } = gameWithFirstEvent('meteor');
+  const met = g.features.meteors.map(m => m.sq);
+  assert.equal(met.length, 2);
+  assert.ok(met.every(i => isVoid(g.state, i)));
+  assert.ok(g.features.meteors.every(m => m.ttl === 6));
+  const rs = playRandom(g, 6, rand);
+  assert.equal(rs.length, 6);
+  const clear = rs.flatMap(r => r.events).filter(e => e.type === 'meteor-clear');
+  assert.equal(clear.length, 1);
+  assert.equal(rs.findIndex(r => r.events.includes(clear[0])), 5);   // ply 16
+  assert.deepEqual(clear[0].squares.slice().sort(), met.slice().sort());
+  for (const i of met) assert.ok(!isVoid(g.state, i));
+  assert.deepEqual(g.features.meteors, []);
+
+  ({ g, rand } = gameWithFirstEvent('wormhole-open'));
+  const w = g.features.wormholes.find(x => x.ttl !== null);
+  assert.equal(w.ttl, 12);
+  assert.equal(twinOf(g.state, w.a), w.b);
+  const more = playRandom(g, 12, rand);
+  assert.equal(more.length, 12);
+  const close = more.flatMap(r => r.events).find(e => e.type === 'wormhole-close');
+  assert.deepEqual([close.a, close.b], [w.a, w.b]);
+  assert.equal(more.findIndex(r => r.events.includes(close)), 11);   // ply 22
+  assert.equal(twinOf(g.state, w.a), -1);
+  assert.equal(g.features.wormholes.length, 1);
+});
+
+test('undo across cosmic events restores everything, and replaying gives the same events', () => {
+  for (const seed of [3, 8, 21]) {
+    const g = new Game(null, { cosmic: true, seed }), rand = mulberry(seed);
+    const snaps = [], moves = [];
+    for (let k = 0; k < 34 && !g.result; k++) {
+      snaps.push([snapshot(g.state), JSON.stringify(g.features), g.rng, g.nextEvent]);
+      const ms = g.moves();
+      const m = ms[Math.floor(rand() * ms.length)];
+      moves.push({ from: m.from, to: m.to, promo: m.promo });
+      g.play(m);
+    }
+    const events = g.log.map(e => JSON.stringify(e.events));
+    assert.ok(events.filter(e => e !== '[]').length >= 3, 'expected cosmic events to undo');
+    while (snaps.length) {
+      g.undo();
+      assert.deepEqual([snapshot(g.state), JSON.stringify(g.features), g.rng, g.nextEvent], snaps.pop());
+    }
+    for (const m of moves) g.play(m);
+    assert.deepEqual(g.log.map(e => JSON.stringify(e.events)), events);
+  }
+});
+
+test('random cosmic games: no crashes, nothing lands in a void, no Commander left en prise', () => {
+  const rand = mulberry(777);
+  let events = 0;
+  for (let game = 0; game < 20; game++) {
+    const g = new Game(null, { cosmic: true, seed: game + 1 });
+    for (let k = 0; k < 150 && !g.result; k++) {
+      const ms = g.moves();
+      for (const m of ms) {
+        assert.ok(!isVoid(g.state, m.to), 'move into a void');
+        if (m.transit >= 0) assert.equal(g.pieceAt(m.transit), null);
+      }
+      const r = g.play(ms[Math.floor(rand() * ms.length)]);
+      events += r.events.length;
+      assert.ok(!inCheck(g.state, g.state.turn ^ 1), 'the fleet that just moved is in check');
+      const f = g.features;
+      for (const i of [...f.holes, ...f.meteors.map(x => x.sq)]) assert.ok(isVoid(g.state, i));
+      for (const { a, b } of f.wormholes) assert.ok(!isVoid(g.state, a) && !isVoid(g.state, b));
+      assert.equal(positionKey(g.state), positionKey(deserialize(serialize(g.state))));
+    }
+  }
+  assert.ok(events > 40, `only ${events} events`);
 });

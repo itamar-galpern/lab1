@@ -79,6 +79,15 @@ const SOUNDS = {
   win: () => [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, k) => tone(f, { dur: 0.16, vol: 0.28, at: k * 0.11 })),
   lose: () => [440, 392, 349, 262].forEach((f, k) => tone(f, { type: 'triangle', dur: 0.26, vol: 0.3, at: k * 0.2 })),
   draw: () => [523, 523, 392].forEach((f, k) => tone(f, { type: 'triangle', dur: 0.2, vol: 0.28, at: k * 0.16 })),
+  tick: () => tone(1500, { type: 'square', dur: 0.03, vol: 0.18 }),
+  alarm: () => [0, 0.25, 0.5].forEach(at => { tone(950, { dur: 0.18, vol: 0.32, at }); tone(700, { dur: 0.18, vol: 0.32, at: at + 0.1 }); }),
+  event: () => { tone(440, { type: 'sawtooth', dur: 0.5, vol: 0.14, to: 880 }); tone(880, { type: 'sawtooth', dur: 0.5, vol: 0.14, to: 440, at: 0.5 }); },
+  drift: () => { tone(55, { type: 'sine', dur: 1.6, vol: 0.55, to: 38, attack: 0.3 }); noise({ dur: 1.5, vol: 0.18, from: 400, to: 80 }); },
+  meteor: () => { tone(1800, { type: 'sine', dur: 0.7, vol: 0.18, to: 300 }); noise({ dur: 0.7, vol: 0.15, from: 6000, to: 900, q: 3 }); },
+  portal: () => { tone(330, { type: 'sine', dur: 0.9, vol: 0.25, to: 990 }); tone(495, { type: 'triangle', dur: 0.9, vol: 0.12, to: 1480, at: 0.1 }); },
+  clear: () => noise({ dur: 0.5, vol: 0.25, from: 2000, to: 200 }),
+  hint: () => [784, 988, 1175].forEach((f, k) => tone(f, { type: 'sine', dur: 0.18, vol: 0.25, at: k * 0.08 })),
+  trophy: () => [659, 784, 988, 1319, 988, 1319].forEach((f, k) => tone(f, { type: 'square', dur: 0.12, vol: 0.2, at: k * 0.09 })),
 };
 
 export function play(name) {

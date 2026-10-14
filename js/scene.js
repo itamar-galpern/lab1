@@ -439,42 +439,26 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
     deck.add(under);
   }
 
-  // ----- tiles, overlays and markers -----
-  const holeSet = new Set(BLACK_HOLES);
-  const twin = new Map();
-  for (const [a, b] of WORMHOLES) { twin.set(a, b); twin.set(b, a); }
-
+  // ----- tiles, overlays and markers (one per square; a black hole hides its tile) -----
   const tileMats = {
     light: new THREE.MeshPhysicalMaterial({ map: tileTexture(LIGHT, 'rgba(28,63,114,0.28)'), roughness: 0.6, metalness: 0.1, envMapIntensity: 0.45, clearcoat: 0.5, clearcoatRoughness: 0.3 }),
     dark: new THREE.MeshPhysicalMaterial({ map: tileTexture(DARK, 'rgba(120,200,255,0.3)'), roughness: 0.25, metalness: 0.55, envMapIntensity: 0.75, clearcoat: 0.7, clearcoatRoughness: 0.15 }),
     portal: new THREE.MeshStandardMaterial({ map: tileTexture('#170c34', 'rgba(198,155,255,0.55)'), roughness: 0.3, metalness: 0.6, envMapIntensity: 0.5 }),
   };
   const tileGeo = new THREE.BoxGeometry(0.95, 0.1, 0.95);
-  const pickables = [];
+  const tiles = [];      // also the picking targets (raycasts hit hidden tiles too)
   const overlays = [];
   const markers = [];
   const dotGeo = new THREE.CircleGeometry(0.13, 32);
   const ringGeo = new THREE.RingGeometry(0.33, 0.42, 48);
 
   for (let i = 0; i < 64; i++) {
-    const x = i % 8, y = i >> 3;
-    if (holeSet.has(i)) {
-      const pick = new THREE.Mesh(new THREE.CircleGeometry(0.48, 24), new THREE.MeshBasicMaterial({ visible: false }));
-      pick.rotation.x = -Math.PI / 2;
-      pick.position.copy(sqPos(i, 0.035));
-      pick.userData.sq = i;
-      deck.add(pick);
-      pickables.push(pick);
-      overlays.push(null);
-      markers.push(null);
-      continue;
-    }
-    const tile = new THREE.Mesh(tileGeo, twin.has(i) ? tileMats.portal : (x + y) % 2 ? tileMats.dark : tileMats.light);
-    tile.position.set(cx(x), 0, cz(y));
+    const tile = new THREE.Mesh(tileGeo, tileMats.light);
+    tile.position.copy(sqPos(i, 0));
     tile.receiveShadow = true;
     tile.userData.sq = i;
     deck.add(tile);
-    pickables.push(tile);
+    tiles.push(tile);
 
     const ov = new THREE.Mesh(new THREE.PlaneGeometry(0.95, 0.95), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, color: 0xffffff }));
     ov.rotation.x = -Math.PI / 2;
@@ -495,12 +479,29 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
     markers.push({ dot, ring: rng });
   }
 
-  // ----- black holes -----
-  for (const i of BLACK_HOLES) {
+  // ----- space features: black holes, meteor-blocked squares and wormholes -----
+  // They can appear, drift and vanish during a game (cosmic events), so each is built on demand.
+  const featureGroup = new THREE.Group();
+  deck.add(featureGroup);
+  let feat = { holes: new Set(), meteors: new Set(), twin: new Map() };
+  const holeObjs = new Map(), meteorObjs = new Map(), portalObjs = new Map(), linkObjs = new Map();
+  let portalOn = 0, portalTarget = 0;
+
+  function disposeTree(g) {
+    featureGroup.remove(g);
+    g.traverse(o => { o.geometry?.dispose(); if (o.material && o.material !== tileMats.light) o.material.dispose?.(); });
+  }
+
+  function paintTile(i) {
+    const x = i % 8, y = i >> 3;
+    tiles[i].material = feat.twin.has(i) ? tileMats.portal : (x + y) % 2 ? tileMats.dark : tileMats.light;
+    tiles[i].visible = !feat.holes.has(i);
+  }
+
+  function makeHole(i) {
     const g = new THREE.Group();
     g.position.copy(sqPos(i, 0));
-    deck.add(g);
-    const disk = new THREE.Mesh(new THREE.CircleGeometry(0.5, 64), new THREE.ShaderMaterial({
+    const diskMat = new THREE.ShaderMaterial({
       transparent: true, depthWrite: false,
       uniforms: { uTime: { value: 0 } },
       vertexShader: UV_VERT,
@@ -510,24 +511,27 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
           vec2 p = vUv - 0.5; float r = length(p) * 2.0; float a = atan(p.y, p.x);
           float swirl = 0.5 + 0.5 * sin(a * 3.0 + 7.0 * log(r + 0.04) - uTime * 2.6);
           float swirl2 = 0.5 + 0.5 * sin(a * 5.0 + 11.0 * log(r + 0.04) - uTime * 3.7);
-          float disk = smoothstep(1.0, 0.6, r) * smoothstep(0.24, 0.4, r);
-          vec3 col = mix(vec3(0.45, 0.12, 0.85), vec3(1.0, 0.5, 1.0), swirl);
-          col = mix(col, vec3(1.0, 0.62, 0.25), smoothstep(0.7, 0.32, r) * swirl2);
-          float glow = disk * (0.45 + 0.9 * swirl * (0.55 + 0.45 * swirl2));
-          float core = smoothstep(0.34, 0.25, r);
-          vec3 c = col * glow * 1.9;
-          float alpha = clamp(glow + core + smoothstep(1.0, 0.75, r) * 0.65, 0.0, 1.0);
-          gl_FragColor = vec4(c * (1.0 - core), alpha);
+          // Amber accretion disk, a pitch-black core and a thin bright photon ring.
+          float disk = smoothstep(1.0, 0.62, r) * smoothstep(0.38, 0.52, r);
+          vec3 col = mix(vec3(0.5, 0.14, 0.03), vec3(1.0, 0.58, 0.18), swirl);
+          col = mix(col, vec3(1.0, 0.88, 0.65), smoothstep(0.66, 0.46, r) * swirl2);
+          float glow = disk * (0.3 + 0.8 * swirl * (0.55 + 0.45 * swirl2));
+          float core = smoothstep(0.46, 0.38, r);
+          float ring = smoothstep(0.035, 0.0, abs(r - 0.43));
+          vec3 c = col * glow * 1.35 * (1.0 - core) + vec3(1.0, 0.78, 0.5) * ring * 1.5;
+          float alpha = clamp(glow + core + ring + smoothstep(1.0, 0.75, r) * 0.65, 0.0, 1.0);
+          gl_FragColor = vec4(c, alpha);
         }`,
-    }));
+    });
+    const disk = new THREE.Mesh(new THREE.CircleGeometry(0.5, 64), diskMat);
     disk.rotation.x = -Math.PI / 2;
     disk.position.y = 0.032;
     disk.renderOrder = 1;
     g.add(disk);
-    const horizon = new THREE.Mesh(new THREE.SphereGeometry(0.15, 32, 16), new THREE.MeshBasicMaterial({ color: 0x000000 }));
+    const horizon = new THREE.Mesh(new THREE.SphereGeometry(0.17, 32, 16), new THREE.MeshBasicMaterial({ color: 0x000000 }));
     horizon.position.y = 0.06;
     g.add(horizon);
-    const lens = new THREE.Mesh(new THREE.SphereGeometry(0.19, 32, 16), fresnel(0xc69bff, 1.5, 3.4));
+    const lens = new THREE.Mesh(new THREE.SphereGeometry(0.2, 32, 16), fresnel(0xffa555, 1.8, 2.6));
     lens.position.y = 0.06;
     g.add(lens);
     // A faint polar jet streaming up out of the hole.
@@ -539,14 +543,13 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
         uniform float uTime; varying vec2 vUv;
         void main() {
           float a = pow(1.0 - vUv.y, 1.4) * (0.22 + 0.12 * sin(vUv.y * 30.0 - uTime * 9.0)) * smoothstep(0.0, 0.08, vUv.y);
-          gl_FragColor = vec4(vec3(0.75, 0.45, 1.0) * a * 1.6, a);
+          gl_FragColor = vec4(vec3(0.6, 0.78, 1.0) * a * 1.5, a);
         }`,
     });
     const jet = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.11, 1.1, 24, 1, true), jetMat);
     jet.position.y = 0.6;
     g.add(jet);
-    animated.push({ tick: t => { jetMat.uniforms.uTime.value = t; } });
-    const halo = new THREE.Mesh(new THREE.TorusGeometry(0.47, 0.012, 8, 64), new THREE.MeshBasicMaterial({ color: hot(0xb07cff, 1.8) }));
+    const halo = new THREE.Mesh(new THREE.TorusGeometry(0.47, 0.012, 8, 64), new THREE.MeshBasicMaterial({ color: hot(0xff9a40, 1.5) }));
     halo.rotation.x = Math.PI / 2;
     halo.position.y = 0.02;
     g.add(halo);
@@ -579,20 +582,19 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
         varying float vA;
         void main() {
           float a = smoothstep(0.5, 0.0, length(gl_PointCoord - 0.5)) * vA;
-          gl_FragColor = vec4(mix(vec3(1.0, 0.6, 0.25), vec3(0.8, 0.45, 1.0), vA) * a * 2.4, a);
+          gl_FragColor = vec4(mix(vec3(1.0, 0.45, 0.12), vec3(1.0, 0.85, 0.6), vA) * a * 2.2, a);
         }`,
     });
     g.add(new THREE.Points(pg, pm));
-    animated.push({ tick: t => { disk.material.uniforms.uTime.value = t; pm.uniforms.uTime.value = t; } });
+    g.userData.tick = t => { diskMat.uniforms.uTime.value = t; jetMat.uniforms.uTime.value = t; pm.uniforms.uTime.value = t; };
+    featureGroup.add(g);
+    return g;
   }
 
-  // ----- wormhole portals and the link between them -----
-  const portalMats = [];
-  for (const i of twin.keys()) {
+  function makePortal(i) {
     const g = new THREE.Group();
     g.position.copy(sqPos(i, TOP));
-    deck.add(g);
-    const swirl = new THREE.Mesh(new THREE.CircleGeometry(0.44, 48), new THREE.ShaderMaterial({
+    const swirlMat = new THREE.ShaderMaterial({
       ...additive,
       uniforms: { uTime: { value: 0 }, uOn: { value: 0 } },
       vertexShader: UV_VERT,
@@ -605,7 +607,8 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
           float al = smoothstep(1.0, 0.3, r) * (0.2 + 0.6 * s) * (0.6 + 0.4 * uOn);
           gl_FragColor = vec4(c * al * (0.75 + 0.9 * uOn), al);
         }`,
-    }));
+    });
+    const swirl = new THREE.Mesh(new THREE.CircleGeometry(0.44, 48), swirlMat);
     swirl.rotation.x = -Math.PI / 2;
     swirl.position.y = 0.004;
     swirl.renderOrder = 2;
@@ -654,26 +657,87 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
         }`,
     });
     g.add(new THREE.Points(pg, pm));
-    portalMats.push(swirl.material, ringMat, pm);
+    g.userData.tick = t => {
+      const on = Math.min(1, portalOn);
+      for (const m of [swirlMat, ringMat]) { m.uniforms.uTime.value = t; m.uniforms.uOn.value = on; }
+      pm.uniforms.uTime.value = t;
+    };
+    featureGroup.add(g);
+    return g;
   }
-  const [wa, wb] = WORMHOLES[0];
-  const linkCurve = new THREE.QuadraticBezierCurve3(sqPos(wa, 0.1), new THREE.Vector3(0, 3.4, 0), sqPos(wb, 0.1));
-  const linkMat = new THREE.ShaderMaterial({
-    ...additive,
-    uniforms: { uTime: { value: 0 }, uOn: { value: 0 } },
-    vertexShader: UV_VERT,
-    fragmentShader: `
-      uniform float uTime; uniform float uOn; varying vec2 vUv;
-      void main() {
-        float d = fract(vUv.x * 16.0 - uTime * 1.8);
-        float dash = smoothstep(0.0, 0.2, d) * smoothstep(0.75, 0.45, d);
-        float fade = smoothstep(0.0, 0.1, vUv.x) * smoothstep(1.0, 0.9, vUv.x);
-        float a = fade * (0.1 + 0.9 * uOn) * (0.3 + 0.7 * dash);
-        gl_FragColor = vec4(mix(vec3(0.69, 0.49, 1.0), vec3(0.31, 0.94, 1.0), vUv.x) * a * 2.4, a);
-      }`,
-  });
-  deck.add(new THREE.Mesh(new THREE.TubeGeometry(linkCurve, 80, 0.03, 8, false), linkMat));
-  let portalOn = 0, portalTarget = 0;
+
+  // The glowing arc that shows which two squares a wormhole joins.
+  function makeLink(a, b) {
+    const pa = sqPos(a, 0.1), pb = sqPos(b, 0.1);
+    const mid = pa.clone().lerp(pb, 0.5).setY(2.2 + pa.distanceTo(pb) * 0.2);
+    const mat = new THREE.ShaderMaterial({
+      ...additive,
+      uniforms: { uTime: { value: 0 }, uOn: { value: 0 }, uFade: { value: 1 } },
+      vertexShader: UV_VERT,
+      fragmentShader: `
+        uniform float uTime; uniform float uOn; uniform float uFade; varying vec2 vUv;
+        void main() {
+          float d = fract(vUv.x * 16.0 - uTime * 1.8);
+          float dash = smoothstep(0.0, 0.2, d) * smoothstep(0.75, 0.45, d);
+          float fade = smoothstep(0.0, 0.1, vUv.x) * smoothstep(1.0, 0.9, vUv.x);
+          float a = fade * (0.1 + 0.9 * uOn) * (0.3 + 0.7 * dash) * uFade;
+          gl_FragColor = vec4(mix(vec3(0.69, 0.49, 1.0), vec3(0.31, 0.94, 1.0), vUv.x) * a * 2.4, a);
+        }`,
+    });
+    const g = new THREE.Mesh(new THREE.TubeGeometry(new THREE.QuadraticBezierCurve3(pa, mid, pb), 80, 0.03, 8, false), mat);
+    g.userData.tick = t => { mat.uniforms.uTime.value = t; mat.uniforms.uOn.value = Math.min(1, portalOn); };
+    featureGroup.add(g);
+    return g;
+  }
+
+  // A meteor lying on a square: glowing lava rocks with embers.
+  function makeMeteor(i) {
+    const g = new THREE.Group();
+    g.position.copy(sqPos(i, TOP));
+    const rockMat = new THREE.MeshStandardMaterial({ color: 0x3b2c26, roughness: 0.9, flatShading: true, emissive: 0xff5a1a, emissiveIntensity: 0.5 });
+    const rocks = new THREE.Group();
+    [[0, 0.2, 0, 0.24], [0.17, 0.12, 0.1, 0.15], [-0.14, 0.11, -0.12, 0.14], [-0.05, 0.1, 0.2, 0.11]].forEach(([x, y, z, r]) => {
+      const m = new THREE.Mesh(new THREE.IcosahedronGeometry(r, 0), rockMat);
+      m.position.set(x, y, z);
+      m.rotation.set(rnd(0, 6), rnd(0, 6), rnd(0, 6));
+      m.castShadow = true;
+      rocks.add(m);
+    });
+    g.add(rocks);
+    const glow = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 1.1), new THREE.MeshBasicMaterial({ map: glowTexture(), color: new THREE.Color(0xff6a20).multiplyScalar(1.4), ...additive }));
+    glow.rotation.x = -Math.PI / 2;
+    glow.position.y = 0.01;
+    g.add(glow);
+    g.userData.rocks = rocks;
+    g.userData.tick = t => { rockMat.emissiveIntensity = 0.45 + 0.25 * Math.sin(t * 3 + i); rocks.rotation.y = t * 0.15; };
+    featureGroup.add(g);
+    return g;
+  }
+
+  const linkKey = (a, b) => `${Math.min(a, b)}-${Math.max(a, b)}`;
+
+  // Make the board's features match { holes, meteors: [{ sq }], wormholes: [{ a, b }] } at once.
+  function setFeatures(f) {
+    const holes = new Set(f.holes || []);
+    const meteors = new Set((f.meteors || []).map(m => (typeof m === 'number' ? m : m.sq)));
+    const pairs = (f.wormholes || []).map(w => (Array.isArray(w) ? w : [w.a, w.b]));
+    const twin = new Map();
+    for (const [a, b] of pairs) { twin.set(a, b); twin.set(b, a); }
+    const sync = (objs, want, make) => {
+      for (const [i, g] of [...objs]) if (!want.has(i)) { disposeTree(g); objs.delete(i); }
+      for (const i of want) if (!objs.has(i)) objs.set(i, make(i));
+    };
+    sync(holeObjs, holes, makeHole);
+    sync(meteorObjs, meteors, makeMeteor);
+    sync(portalObjs, new Set(twin.keys()), makePortal);
+    const keys = new Set(pairs.map(([a, b]) => linkKey(a, b)));
+    for (const [k, g] of [...linkObjs]) if (!keys.has(k)) { disposeTree(g); linkObjs.delete(k); }
+    for (const [a, b] of pairs) if (!linkObjs.has(linkKey(a, b))) linkObjs.set(linkKey(a, b), makeLink(a, b));
+    for (const g of [...holeObjs.values(), ...meteorObjs.values(), ...portalObjs.values()]) g.scale.setScalar(1);
+    feat = { holes, meteors, twin };
+    for (let i = 0; i < 64; i++) { paintTile(i); tiles[i].scale.setScalar(1); }
+  }
+  setFeatures({ holes: BLACK_HOLES, wormholes: WORMHOLES });
 
   // ----- orbit seam curtains on the left and right edges -----
   const seamMat = new THREE.ShaderMaterial({
@@ -754,8 +818,8 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
 
   function paintOverlays() {
     overlays.forEach((ov, i) => {
-      if (!ov) return;
       const m = ov.material;
+      if (feat.holes.has(i)) { m.opacity = 0; return; }
       if (i === hl.check) { m.color.setHex(0xff3b3b); m.opacity = 0.5; }
       else if (i === hl.selected) { m.color.setHex(0x7ff6ff); m.opacity = 0.42; }
       else if (hl.last && (i === hl.last.from || i === hl.last.to)) { m.color.setHex(0xffc24a); m.opacity = 0.34; }
@@ -770,19 +834,27 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
     for (const t of hl.targets) {
       const mk = markers[t.to];
       if (!mk) continue;
+      if (t.warp) {
+        // Warp destinations get both a ring and a dot, in the wormhole's violet.
+        mk.ring.visible = mk.dot.visible = true;
+        mk.ring.material.color.copy(hot(t.cap ? 0xff5a4a : 0xc69bff, 2.4));
+        mk.dot.material.color.copy(hot(0xc69bff, 2.6));
+        continue;
+      }
       const show = t.cap ? mk.ring : mk.dot;
       show.visible = true;
-      show.material.color.copy(t.warp ? hot(0xc69bff, 2.6) : t.cap ? hot(0xff5a4a, 2.4) : hot(0xbff8ff, 2));
+      show.material.color.copy(t.cap ? hot(0xff5a4a, 2.4) : hot(0xbff8ff, 2));
     }
     beam.visible = hl.selected >= 0;
     if (beam.visible) beam.position.copy(sqPos(hl.selected, TOP + 0.75));
-    portalTarget = hl.targets.some(t => t.warp) || twin.has(hl.selected) ? 1 : 0;
+    portalTarget = hl.targets.some(t => t.warp) || feat.twin.has(hl.selected) ? 1 : 0;
     paintOverlays();
   }
 
   // ----- tweens and effects -----
   const tweens = new Set();
-  const tween = (ms, fn) => new Promise(res => tweens.add({ t0: performance.now(), ms, fn, res }));
+  let timeScale = 1; // above 1 = slow motion (the checkmate replay)
+  const tween = (ms, fn) => new Promise(res => tweens.add({ t0: performance.now(), ms: ms * timeScale, fn, res }));
   const fx = new THREE.Group();
   scene.add(fx);
   const particles = [];
@@ -965,9 +1037,12 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
         }
       }
       await Promise.all(jobs);
-      obj.userData.sq = mv.to;
-      pieceAt.set(mv.to, obj);
-      if (mv.promo) await promote(obj, mv.to, mv.promo, obj.userData.side);
+      // Landing on a wormhole flings the ship out of the other end.
+      let at = mv.to;
+      if (mv.transit >= 0) { await warp(obj, mv.to, mv.transit, null); at = mv.transit; }
+      obj.userData.sq = at;
+      pieceAt.set(at, obj);
+      if (mv.promo) await promote(obj, at, mv.promo, obj.userData.side);
     } finally {
       setBoard(boardAfter);
       busy = false;
@@ -985,11 +1060,212 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
     }, 330);
   }
 
+  // ----- cosmic events, hints and the checkmate replay -----
+  let shakeAmp = 0;
+  const shakeOffset = new THREE.Vector3();
+  function shake(amount) { shakeAmp = Math.max(shakeAmp, amount); }
+  const wait = ms => new Promise(r => setTimeout(r, ms * timeScale));
+
+  // A black hole slides to a nearby square, swallowing that tile and giving the old one back.
+  async function drift(from, to) {
+    const g = holeObjs.get(from);
+    if (!g) return;
+    holeObjs.delete(from);
+    feat.holes.delete(from);
+    const a = sqPos(from, 0), b = sqPos(to, 0);
+    const tf = tiles[from], tt = tiles[to];
+    tf.visible = true;
+    tf.scale.setScalar(0.001);
+    onFx('drift');
+    shake(0.12);
+    await tween(1600, k => {
+      const e = ease(k);
+      g.position.lerpVectors(a, b, e);
+      g.rotation.y = e * 5;
+      g.scale.setScalar(1 + Math.sin(Math.PI * k) * 0.35);
+      tf.scale.setScalar(Math.max(0.001, smooth(0.3, 1, k)));
+      tt.scale.setScalar(Math.max(0.001, 1 - smooth(0.4, 0.95, k)));
+    });
+    tt.visible = false;
+    tt.scale.setScalar(1);
+    tf.scale.setScalar(1);
+    g.rotation.y = 0;
+    g.scale.setScalar(1);
+    holeObjs.set(to, g);
+    feat.holes.add(to);
+    burst(sqPos(to, 0.25), 0xff9a40, { count: 60, speed: 1.6, life: 0.9 });
+    shockwave(sqPos(to), 0xff9a40);
+  }
+
+  async function openWormhole(a, b) {
+    for (const i of [a, b]) {
+      if (!portalObjs.has(i)) { const g = makePortal(i); g.scale.setScalar(0.001); portalObjs.set(i, g); }
+    }
+    feat.twin.set(a, b);
+    feat.twin.set(b, a);
+    paintTile(a);
+    paintTile(b);
+    const link = linkObjs.get(linkKey(a, b)) || makeLink(a, b);
+    linkObjs.set(linkKey(a, b), link);
+    link.material.uniforms.uFade.value = 0;
+    portalOn = 1.6;
+    onFx('portal');
+    for (const i of [a, b]) { burst(sqPos(i, 0.3), 0xb07cff, { count: 70, speed: 2, life: 1 }); shockwave(sqPos(i), 0x4ff0ff); }
+    await tween(900, k => {
+      const e = k < 0.7 ? (k / 0.7) * 1.25 : 1.25 - ((k - 0.7) / 0.3) * 0.25; // overshoot, then settle
+      for (const i of [a, b]) portalObjs.get(i).scale.setScalar(Math.max(0.001, e));
+      link.material.uniforms.uFade.value = k;
+    });
+  }
+
+  async function closeWormhole(a, b) {
+    const gs = [a, b].map(i => portalObjs.get(i)).filter(Boolean);
+    const link = linkObjs.get(linkKey(a, b));
+    onFx('portal');
+    await tween(700, k => {
+      for (const g of gs) { g.scale.setScalar(Math.max(0.001, 1 - ease(k))); g.rotation.y = k * 6; }
+      if (link) link.material.uniforms.uFade.value = 1 - k;
+    });
+    for (const i of [a, b]) {
+      const g = portalObjs.get(i);
+      if (g) { disposeTree(g); portalObjs.delete(i); }
+      feat.twin.delete(i);
+      paintTile(i);
+      burst(sqPos(i, 0.3), 0x4ff0ff, { count: 30, speed: 1.2, life: 0.6 });
+    }
+    if (link) { disposeTree(link); linkObjs.delete(linkKey(a, b)); }
+  }
+
+  // Meteors streak in from the sky, one after another, and smash into their squares.
+  async function meteorStrike(squares) {
+    await Promise.all(squares.map(async (i, n) => {
+      await wait(n * 300);
+      const g = meteorObjs.get(i) || makeMeteor(i);
+      meteorObjs.set(i, g);
+      feat.meteors.add(i);
+      const end = sqPos(i, TOP);
+      const start = end.clone().add(new THREE.Vector3(rnd(-4, 4), 11, rnd(-6, -2)));
+      g.position.copy(start);
+      const dir = end.clone().sub(start).normalize();
+      const trail = new THREE.Mesh(new THREE.ConeGeometry(0.24, 2.6, 16, 1, true), new THREE.MeshBasicMaterial({ color: hot(0xff7a2a, 2.2), ...additive, opacity: 0.85, side: THREE.DoubleSide }));
+      trail.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().negate());
+      fx.add(trail);
+      onFx('meteor');
+      await tween(700, k => {
+        g.position.lerpVectors(start, end, k * k);
+        g.userData.rocks.rotation.x = k * 8;
+        trail.position.copy(g.position).addScaledVector(dir, -1.3);
+      });
+      fx.remove(trail);
+      trail.geometry.dispose();
+      trail.material.dispose();
+      g.position.copy(end);
+      burst(end.clone().setY(0.35), 0xff7a2a, { count: 90, speed: 2.6, life: 1 });
+      burst(end.clone().setY(0.3), 0xffffff, { count: 25, speed: 1.4, life: 0.5, size: 0.09 });
+      shockwave(end, 0xff7a2a);
+      flash(end, 0xff7a2a, 10);
+      shake(0.18);
+      onFx('boom');
+    }));
+  }
+
+  async function clearMeteors(squares) {
+    const gs = squares.map(i => meteorObjs.get(i)).filter(Boolean);
+    onFx('clear');
+    await tween(600, k => gs.forEach(g => g.scale.setScalar(Math.max(0.001, 1 - ease(k)))));
+    for (const i of squares) {
+      const g = meteorObjs.get(i);
+      if (g) { disposeTree(g); meteorObjs.delete(i); }
+      feat.meteors.delete(i);
+      burst(sqPos(i, 0.25), 0xb8b4c4, { count: 30, speed: 1, life: 0.6 });
+    }
+  }
+
+  // Plays the cosmic events returned by Game.play, in order.
+  async function playEvents(events) {
+    busy = true;
+    try {
+      for (const e of events) {
+        if (e.type === 'drift') await drift(e.from, e.to);
+        else if (e.type === 'wormhole-open') await openWormhole(e.a, e.b);
+        else if (e.type === 'wormhole-close') await closeWormhole(e.a, e.b);
+        else if (e.type === 'meteor') await meteorStrike(e.squares);
+        else if (e.type === 'meteor-clear') await clearMeteors(e.squares);
+      }
+    } finally {
+      busy = false;
+    }
+  }
+
+  // A green arc from the suggested ship to its destination, with pulsing rings at both ends.
+  let hintObjs = [];
+  function setHint(mv) {
+    for (const o of hintObjs) { deck.remove(o); o.geometry.dispose(); o.material.dispose(); }
+    hintObjs = [];
+    if (!mv) return;
+    const end = mv.transit >= 0 ? mv.transit : mv.to;
+    const fx0 = mv.from % 8;
+    const wraps = mv.kind === 'move' && mv.transit < 0 && (fx0 + mv.vx < 0 || fx0 + mv.vx > 7);
+    const pa = sqPos(mv.from, 0.15);
+    // A move round the orbit points off the edge it leaves through.
+    const pb = wraps ? pa.clone().add(new THREE.Vector3(mv.vx, 0, mv.vy)) : sqPos(end, 0.15);
+    const mid = pa.clone().lerp(pb, 0.5).setY(1.1 + pa.distanceTo(pb) * 0.15);
+    const mat = new THREE.ShaderMaterial({
+      ...additive,
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: UV_VERT,
+      fragmentShader: `
+        uniform float uTime; varying vec2 vUv;
+        void main() {
+          float d = fract(vUv.x * 10.0 - uTime * 2.5);
+          float dash = smoothstep(0.0, 0.25, d) * smoothstep(0.8, 0.5, d);
+          float a = (0.35 + 0.65 * dash) * smoothstep(0.0, 0.06, vUv.x);
+          gl_FragColor = vec4(vec3(0.37, 0.82, 0.41) * a * 2.4, a);
+        }`,
+    });
+    const arc = new THREE.Mesh(new THREE.TubeGeometry(new THREE.QuadraticBezierCurve3(pa, mid, pb), 60, 0.05, 8, false), mat);
+    arc.userData.tick = t => { mat.uniforms.uTime.value = t; };
+    hintObjs.push(arc);
+    for (const i of [mv.from, end]) {
+      const r = new THREE.Mesh(new THREE.RingGeometry(0.34, 0.46, 48), new THREE.MeshBasicMaterial({ color: hot(0x5fd068, 2.4), ...additive, side: THREE.DoubleSide }));
+      r.rotation.x = -Math.PI / 2;
+      r.position.copy(sqPos(i, TOP + 0.012));
+      r.userData.tick = t => r.scale.setScalar(1 + 0.15 * Math.sin(t * 6));
+      hintObjs.push(r);
+    }
+    deck.add(...hintObjs);
+  }
+
+  // Slow-motion close-up of the winning move, then back to the normal view.
+  async function replay(mv, before, after, side) {
+    controls.enabled = false;
+    look.copy(controls.target);
+    setHighlights({});
+    setHint(null);
+    setBoard(before);
+    const end = mv.transit >= 0 ? mv.transit : mv.to;
+    const mid = sqPos(mv.from, 0.3).lerp(sqPos(end, 0.3), 0.5);
+    await fly(new THREE.Spherical(6.5, 1.0, (side === 1 ? Math.PI : 0) + 0.55), mid, 1400);
+    timeScale = 2.8;
+    try {
+      await animateMove(mv, after);
+      shake(0.3);
+      await tween(450, () => {});
+    } finally {
+      timeScale = 1;
+    }
+    if (mode !== 'game') return; // the player left for the menu mid-replay
+    await fly(gameView(viewSide), new THREE.Vector3(0, 0, 0), 1400);
+    controls.target.set(0, 0, 0);
+    controls.enabled = mode === 'game';
+  }
+
   // ----- camera -----
   let mode = 'menu';
   let menuAz = 0.6;
   const look = new THREE.Vector3(0, 1.6, 0);
   let flight = null;
+  let flyId = 0;
   let insets = { right: 0, bottom: 0 };
   let viewSide = 0;
 
@@ -1011,7 +1287,9 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
     let dTheta = to.theta - from.theta;
     dTheta = Math.atan2(Math.sin(dTheta), Math.cos(dTheta));
     flight = true;
+    const id = ++flyId;
     return tween(ms, k => {
+      if (id !== flyId) return; // a newer flight took over
       const e = ease(k);
       look.lerpVectors(t0, target, e);
       const s = new THREE.Spherical(
@@ -1041,12 +1319,20 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
     }
   }
 
-  function resetView(side = viewSide) {
+  // Fly to a fleet's side of the board. keepZoom keeps the player's current distance and tilt.
+  function resetView(side = viewSide, { keepZoom = false, ms = 900 } = {}) {
     viewSide = side;
     if (mode !== 'game') return Promise.resolve();
     controls.enabled = false;
     look.copy(controls.target);
-    return fly(gameView(side), new THREE.Vector3(0, 0, 0), 900).then(() => { controls.enabled = mode === 'game'; });
+    const to = gameView(side);
+    if (keepZoom) {
+      const now = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target));
+      to.radius = now.radius;
+      to.phi = now.phi;
+    }
+    const id = flyId + 1;
+    return fly(to, new THREE.Vector3(0, 0, 0), ms).then(() => { if (id === flyId) controls.enabled = mode === 'game'; });
   }
 
   function resize() {
@@ -1070,7 +1356,7 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
     const r = canvas.getBoundingClientRect();
     ndc.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     ray.setFromCamera(ndc, camera);
-    const hits = ray.intersectObjects([piecesGroup, ...pickables], true);
+    const hits = ray.intersectObjects([piecesGroup, ...tiles], true);
     for (const h of hits) {
       let o = h.object;
       while (o && o.userData.sq === undefined) o = o.parent;
@@ -1124,13 +1410,12 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
     beam.material.uniforms.uTime.value = t;
 
     portalOn += (Math.max(portalTarget, 0) - portalOn) * Math.min(1, dt * 3);
-    for (const m of portalMats) { m.uniforms.uTime.value = t; if (m.uniforms.uOn) m.uniforms.uOn.value = Math.min(1, portalOn); }
-    linkMat.uniforms.uTime.value = t;
-    linkMat.uniforms.uOn.value = Math.min(1, portalOn);
+    featureGroup.children.forEach(o => o.userData.tick?.(t));
+    hintObjs.forEach(o => o.userData.tick(t));
     seamFlash = Math.max(0, seamFlash - dt * 1.4);
     seamMat.uniforms.uTime.value = t;
     seamMat.uniforms.uFlash.value = seamFlash;
-    updateParticles(dt);
+    updateParticles(dt / timeScale);
 
     if (hoverReq && mode === 'game') {
       const i = pick(hoverReq.x, hoverReq.y);
@@ -1149,7 +1434,11 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
       camera.lookAt(look);
     } else if (controls.enabled) controls.update();
 
+    shakeAmp *= Math.pow(0.03, dt);
+    const shaking = shakeAmp > 0.003;
+    if (shaking) { shakeOffset.set(rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)).multiplyScalar(shakeAmp); camera.position.add(shakeOffset); }
     composer.render();
+    if (shaking) camera.position.sub(shakeOffset);
     requestAnimationFrame(frame);
   }
 
@@ -1168,6 +1457,11 @@ export async function createScene(container, { onSquareClick = () => {}, onHover
 
   return {
     setBoard,
+    setFeatures,
+    playEvents,
+    setHint,
+    replay,
+    shake,
     setHighlights,
     animateMove,
     celebrate,

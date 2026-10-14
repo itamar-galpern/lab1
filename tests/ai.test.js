@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { sq } from '../js/rules.js';
 import { newState, fromFEN, toFEN, legalMoves, makeMove, inCheck, serialize, deserialize } from '../js/engine.js';
 import { LEVELS, chooseMove } from '../js/ai.js';
+import { Game } from '../js/game.js';
 
 const seeded = (a => () => ((a = (a * 16807) % 2147483647) / 2147483647))(42);
 const isLegal = (s, m) => legalMoves(s).some(x => x.from === m.from && x.to === m.to && x.promo === m.promo);
@@ -63,4 +64,28 @@ test('returns null when there is no legal move', () => {
   const stalemate = fromFEN('7k/3R4/7N/8/8/8/8/4K3 b - - 0 1');
   assert.equal(legalMoves(stalemate).length, 0);
   assert.equal(chooseMove(stalemate, 'captain'), null);
+});
+
+test('plays legal moves in cosmic games, on a deserialized layout, and uses transits', () => {
+  const r = (a => () => ((a = (a * 48271) % 2147483647) / 2147483647))(9);
+  let checked = 0;
+  for (const seed of [2, 5, 13]) {
+    const g = new Game(null, { cosmic: true, seed });
+    for (let k = 0; k < 44 && !g.result; k++) {
+      // Every few plies after the first event, ask the computer, the way the worker would.
+      if (k >= 10 && k % 4 === 2) {
+        const copy = deserialize(JSON.parse(JSON.stringify(serialize(g.state))));
+        const m = chooseMove(copy, k % 8 === 2 ? 'captain' : 'pilot', { rand: r, timeScale: 0.1 });
+        assert.ok(isLegal(g.state, m), `illegal ${m.from}-${m.to} after ${k} plies`);
+        checked++;
+      }
+      const ms = g.moves();
+      g.play(ms[Math.floor(r() * ms.length)]);
+    }
+  }
+  assert.ok(checked >= 15);
+  // Mate in one by transit: through b3, out on g6.
+  const s = fromFEN('6rk/6nr/8/8/3N4/8/8/4K3 w - - 0 1');
+  const m = chooseMove(s, 'captain', { rand: seeded, timeScale: 0.5 });
+  assert.deepEqual([m.from, m.to, m.transit], [sq('d4'), sq('b3'), sq('g6')]);
 });

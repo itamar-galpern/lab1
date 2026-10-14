@@ -3,10 +3,9 @@
 // The space rules live in the engine's move generator, so the search plays them without knowing.
 
 import {
-  P, N, B, R, Q, K, FWD, RAYS, KNIGHT, step,
+  P, N, B, R, Q, K, VOID, FWD, RAYS, KNIGHT, step,
   pseudoMoves, legalMoves, makeMove, unmakeMove, makeNull, attacked, cloneState,
 } from './engine.js';
-import { warpTwin, isHole } from './rules.js';
 
 export const LEVELS = [
   { id: 'cadet', name: 'Cadet', blurb: 'Fresh out of the academy and prone to blunders.' },
@@ -49,13 +48,8 @@ const KING_MID = [12, -8, -25, -35, -45, -50, -50, -50];
 const KING_END = [-25, -8, 6, 14, 14, 6, -8, -25];
 const PASSED = [0, 5, 10, 18, 30, 50, 80, 0];
 
-// STUCK[side][i]: an Astronaut on i has a black hole somewhere ahead on its file, so it can
-// never walk to promotion (it can still capture its way out).
-const STUCK = [0, 1].map(side => Array.from({ length: 64 }, (_, i) => {
-  for (let j = i + 8 * FWD[side]; j >= 0 && j < 64; j += 8 * FWD[side]) if (isHole(j)) return true;
-  return false;
-}));
-const WARP = Array.from({ length: 64 }, (_, i) => warpTwin(i) >= 0);
+
+const VOID_RANKS = new Uint8Array(8);
 
 // Score from the point of view of the side to move.
 function evaluate(s) {
@@ -65,8 +59,11 @@ function evaluate(s) {
   // smallest y, so track Solar's largest y (rearmost) and Nebula's smallest y (rearmost).
   const solarBack = [-1, -1, -1, -1, -1, -1, -1, -1], nebulaBack = [8, 8, 8, 8, 8, 8, 8, 8];
   const files = [new Int8Array(8), new Int8Array(8)];
+  // voidRanks[x]: bit y set when (x, y) is a void. The layout can change during a game.
+  const voidRanks = VOID_RANKS.fill(0);
   for (let i = 0; i < 64; i++) {
     const c = b[i];
+    if (c === VOID) { voidRanks[i & 7] |= 1 << (i >> 3); continue; }
     if ((c & 7) !== P) continue;
     const x = i & 7, y = i >> 3;
     if (c >> 3) { if (y < nebulaBack[x]) nebulaBack[x] = y; files[1][x]++; }
@@ -74,7 +71,7 @@ function evaluate(s) {
   }
   for (let i = 0; i < 64; i++) {
     const c = b[i];
-    if (!c) continue;
+    if (!c || c === VOID) continue;
     const t = c & 7, side = c >> 3, sign = side ? -1 : 1;
     const y = i >> 3, r = side ? y : 7 - y;
     phase += PHASE[t];
@@ -91,7 +88,9 @@ function evaluate(s) {
     if (t === P) {
       const x = i & 7;
       if (files[side][x] > 1) v -= 8;
-      if (STUCK[side][i]) v -= 10;
+      // A void ahead on its file: it can never walk to promotion (it can still capture its way out).
+      const ahead = side ? voidRanks[x] >> (y + 1) : voidRanks[x] & ((1 << y) - 1);
+      if (ahead) v -= 10;
       else {
         let passed = true;
         for (let dx = -1; dx <= 1 && passed; dx++) {
@@ -101,18 +100,18 @@ function evaluate(s) {
         if (passed) { mid += sign * PASSED[r] / 2; end += sign * PASSED[r]; }
       }
     } else {
-      if (WARP[i]) v += 8;   // a ship on a wormhole controls both ends
+      if (s.twin[i] >= 0) v += 8;   // a ship on a wormhole controls both ends
       // Mobility.
       let moves = 0;
       if (t === N) {
         const L = KNIGHT[i];
-        for (let k = 0; k < L.length; k += 3) { const tc = b[L[k]]; if (!tc || tc >> 3 !== side) moves++; }
+        for (let k = 0; k < L.length; k += 3) { const tc = b[L[k]]; if (!tc || (tc !== VOID && tc >> 3 !== side)) moves++; }
         v += moves * 3;
       } else {
         const d0 = t === B ? 4 : 0, d1 = t === R ? 4 : 8;
         for (let d = d0; d < d1; d++) {
           const ray = RAYS[i * 8 + d];
-          for (let k = 0; k < ray.length; k++) { const tc = b[ray[k]]; if (!tc) moves++; else { if (tc >> 3 !== side) moves++; break; } }
+          for (let k = 0; k < ray.length; k++) { const tc = b[ray[k]]; if (!tc) moves++; else { if (tc !== VOID && tc >> 3 !== side) moves++; break; } }
         }
         v += moves * (t === B ? 4 : t === R ? 2 : 1);
       }
@@ -138,6 +137,7 @@ function table() {
 // Mate scores are stored relative to the node so they stay right at any distance from the root.
 const toTT = (v, ply) => (v > MATE - 1000 ? v + ply : v < -MATE + 1000 ? v - ply : v);
 const fromTT = (v, ply) => (v > MATE - 1000 ? v - ply : v < -MATE + 1000 ? v + ply : v);
+// A move is fixed by from, to and promotion (a transit follows from the position).
 const encode = m => 1 + m.from + (m.to << 6) + ((m.promo ? 'QRBN'.indexOf(m.promo) + 1 : 0) << 12);
 
 // ---------- search ----------
@@ -178,7 +178,7 @@ function repeated(s) {
 function hasPieces(s, side) {
   for (let i = 0; i < 64; i++) {
     const c = s.board[i];
-    if (c && c >> 3 === side && (c & 7) !== P && (c & 7) !== K) return true;
+    if (c && c !== VOID && c >> 3 === side && (c & 7) !== P && (c & 7) !== K) return true;
   }
   return false;
 }

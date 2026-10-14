@@ -40,6 +40,7 @@
         <h2 class="px-head">MENU</h2>
         <button class="pill green" data-tab="play">PLAY</button>
         <button class="pill cream" data-tab="rules">RULES</button>
+        <button class="pill gold" data-tab="trophies">TROPHIES</button>
         <button class="pill red" data-tab="credits">CREDITS</button>
       </nav>
       <section id="page" class="px-panel dotted menu-page" aria-live="polite"></section>
@@ -59,6 +60,7 @@
       <button class="pill cream small" id="btn-menu"><i class="tri left small"></i> MENU</button>
       <div class="px-panel banner" id="banner" aria-live="polite"></div>
       <div class="hud-tools">
+        <button class="pill small green" id="btn-hint" title="Show a good move (H)">HINT</button>
         <button class="pill small" id="btn-undo" title="Take back your last move">UNDO</button>
         <button class="pill small" id="btn-restart" title="Start this game again">RESTART</button>
         <button class="pill small" id="btn-view" title="Reset the camera">VIEW</button>
@@ -67,12 +69,17 @@
     </div>
     <aside class="px-panel hud-panel" id="hud-panel">
       <div id="fleets" class="fleets"></div>
+      <div id="info" class="info hidden"></div>
       <h3 class="px-head small">SHIP'S LOG</h3>
       <ol id="log" class="log"></ol>
     </aside>
     <div id="toast" class="toast" aria-live="assertive"></div>
   </div>
   <div id="tip" class="tip hidden"></div>
+  <div id="trophy" class="px-panel trophy-pop" aria-live="polite"></div>
+
+  <!-- Letterbox bars for the checkmate replay -->
+  <div id="replay" class="replay" aria-hidden="true"><div class="bar top"><span><i></i>INSTANT REPLAY</span></div><div class="bar bottom"></div></div>
 
   <!-- Dialogs (promotion, results, confirmations) -->
   <div id="overlay" class="overlay hidden">

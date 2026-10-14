@@ -36,6 +36,7 @@ button { font: inherit; color: inherit; }
 .dim { opacity: 0.6; }
 .center { text-align: center; }
 .violet { color: var(--violet); }
+.amber { color: #ffa555; }
 b { color: var(--yellow); font-weight: normal; }
 b.solar { color: var(--solar); }
 b.nebula { color: var(--nebula); }
@@ -347,6 +348,61 @@ body.in-menu .crt { display: block; }
 .boot.done { opacity: 0; pointer-events: none; }
 #boot-err { font: 20px/1.2 var(--txt); color: var(--red); max-width: 520px; text-align: center; letter-spacing: 0; margin: 0 16px; }
 
+/* ---------- missions, trophies, clocks, replay ---------- */
+
+.pill.gold { background: var(--yellow); }
+.mission-list { max-height: 330px; overflow-y: auto; margin: 0 -8px; padding: 0 8px; scrollbar-width: thin; scrollbar-color: var(--teal-xl) var(--teal-d); }
+.item.mission .big { font-size: 14px; }
+.item.mission small { color: var(--teal-xl); }
+.item.mission.done .big { color: var(--green); }
+
+.trophies { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; max-height: 330px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--teal-xl) var(--teal-d); }
+.trophy { display: flex; gap: 10px; align-items: center; background: var(--teal-d); padding: 8px 10px; box-shadow: var(--edge); opacity: 0.5; }
+.trophy.got { opacity: 1; background: #1a5260; }
+.trophy i { font-style: normal; font-size: 24px; width: 30px; text-align: center; flex: none; }
+.trophy b { font: 9px/1.4 var(--px); }
+.trophy p { margin: 2px 0 0; font: 17px/1 var(--txt); }
+
+.info {
+  margin-top: 12px; padding: 8px 10px; background: var(--teal-d); box-shadow: var(--edge);
+  font: 18px/1.15 var(--txt);
+}
+.info b { font: 9px var(--px); }
+
+.clock {
+  margin-left: auto; font: 14px var(--px); color: var(--cream); padding: 6px 8px 5px;
+  background: rgba(0, 0, 0, 0.3); box-shadow: var(--edge); letter-spacing: 1px;
+}
+.clock.run { color: var(--yellow); }
+.clock.low { color: var(--red); animation: blink 0.5s steps(1) infinite; }
+.log li.ev { color: var(--violet); font-size: 16px; }
+
+.dlg-brief { font: 22px/1.2 var(--txt); margin: 0 0 14px; }
+.dlg-brief b { font: 11px var(--px); }
+
+.trophy-pop {
+  position: fixed; z-index: 60; left: 50%; top: 84px;
+  display: flex; gap: 14px; align-items: center; padding: 12px 20px 12px 14px;
+  transform: translate(-50%, -320px); transition: transform 0.45s cubic-bezier(.3, 1.4, .5, 1);
+  pointer-events: none; background: var(--teal-d);
+}
+.trophy-pop.show { transform: translate(-50%, 0); }
+.trophy-pop i { font-style: normal; font-size: 34px; }
+.trophy-pop small { display: block; font: 8px var(--px); color: var(--teal-xl); letter-spacing: 2px; margin-bottom: 6px; }
+.trophy-pop b { font: 12px var(--px); }
+
+/* Letterbox bars and a REC light while the checkmate replays. */
+.replay { position: fixed; inset: 0; z-index: 35; pointer-events: none; }
+.replay.show { pointer-events: auto; }
+.replay .bar { position: absolute; left: 0; right: 0; height: 0; background: #000; transition: height 0.6s ease; }
+.replay .top { top: 0; display: flex; align-items: flex-end; justify-content: center; }
+.replay .bottom { bottom: 0; }
+.replay.show .bar { height: 12vh; }
+.replay span { font: 14px var(--px); color: var(--red); letter-spacing: 3px; margin-bottom: 14px; opacity: 0; transition: opacity 0.4s 0.4s; }
+.replay.show span { opacity: 1; }
+.replay span i { display: inline-block; width: 12px; height: 12px; background: var(--red); margin-right: 12px; animation: blink 0.8s steps(1) infinite; }
+body:has(.replay.show) .hud { opacity: 0; transition: opacity 0.3s; }
+
 /* ---------- small screens ---------- */
 
 @media (max-width: 820px) {
@@ -383,4 +439,9 @@ body.in-menu .crt { display: block; }
   .caps img { width: 22px; height: 22px; }
   .log { flex: 1; font-size: 16px; }
   .toast { top: 26%; white-space: normal; text-align: center; width: 92vw; font-size: 18px; }
+  .trophies { grid-template-columns: 1fr; }
+  .info { display: none; }
+  .clock { font-size: 10px; padding: 4px 5px 3px; }
+  .trophy-pop { top: 64px; max-width: 94vw; }
+  .hud-tools .pill.green { order: -1; }
 }
