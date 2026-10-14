@@ -2,64 +2,86 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Space Chess</title>
-  <meta name="description" content="Space Chess — chess in orbit, with black holes, a wormhole and computer opponents.">
+  <meta name="description" content="Space Chess: 3D chess among the stars, with black holes, a wormhole, an orbit with no edges and computer opponents from Cadet to Overlord.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9A%80%3C/text%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
 </head>
-<body>
+<body class="in-menu">
+  <!-- The 3D space scene sits behind everything -->
+  <div id="world" class="world"></div>
+  <div class="crt" aria-hidden="true"></div>
+
   <!-- Main menu -->
-  <main id="menu" class="screen">
-    <header class="hero">
-      <div class="logo" aria-hidden="true"><span class="b">♞&#xFE0E;</span><span class="p">♚&#xFE0E;</span></div>
-      <h1>Space <span>Chess</span></h1>
-      <p class="sub">Chess in orbit. Steer clear of the black holes, ride the wormhole, and fly off one edge of the board to come back on the other.</p>
+  <main id="menu" class="menu hidden">
+    <header class="title-row">
+      <i class="gem" aria-hidden="true"></i>
+      <div class="px-panel title-panel">
+        <h1 class="logo"><span data-text="SPACE">SPACE</span><span data-text="CHESS">CHESS</span></h1>
+        <p class="tagline">CHESS AMONG THE STARS</p>
+      </div>
+      <i class="gem" aria-hidden="true"></i>
     </header>
-    <nav class="main-menu">
-      <button id="btn-play" class="primary big">Play</button>
-      <button id="btn-rules" class="big">Rules</button>
-    </nav>
+
+    <div class="menu-row">
+      <nav class="px-panel dotted menu-nav" aria-label="Main menu">
+        <h2 class="px-head">MENU</h2>
+        <button class="pill green" data-tab="play">PLAY</button>
+        <button class="pill cream" data-tab="rules">RULES</button>
+        <button class="pill red" data-tab="credits">CREDITS</button>
+      </nav>
+      <section id="page" class="px-panel dotted menu-page" aria-live="polite"></section>
+    </div>
+
+    <div class="select-bar">
+      <button class="tri-btn" id="sel-prev" aria-label="Back"><i class="tri left"></i></button>
+      <button class="pill cream" id="sel-go">SELECT</button>
+      <button class="tri-btn" id="sel-next" aria-label="Next"><i class="tri right"></i></button>
+    </div>
+    <p class="hints">ARROWS MOVE &middot; ENTER SELECT &middot; ESC BACK</p>
   </main>
 
-  <!-- Game -->
-  <div id="game" class="screen hidden">
-    <div class="topbar">
-      <button id="btn-menu" class="ghost">← Menu</button>
-      <h2 id="game-title"></h2>
-      <div class="spacer"></div>
-    </div>
-    <div class="layout">
-      <div id="stage" class="stage">
-        <div id="board-wrap" class="board-wrap">
-          <div id="board" class="board"></div>
-          <div class="edge edge-front"></div>
-        </div>
+  <!-- In-game HUD -->
+  <div id="hud" class="hud hidden">
+    <div class="hud-top">
+      <button class="pill cream small" id="btn-menu"><i class="tri left small"></i> MENU</button>
+      <div class="px-panel banner" id="banner" aria-live="polite"></div>
+      <div class="hud-tools">
+        <button class="pill small" id="btn-undo" title="Take back your last move">UNDO</button>
+        <button class="pill small" id="btn-restart" title="Start this game again">RESTART</button>
+        <button class="pill small" id="btn-view" title="Reset the camera">VIEW</button>
+        <button class="pill small" id="btn-sound" title="Sound on or off">SOUND ON</button>
       </div>
-      <aside class="panel">
-        <div id="status" class="status"></div>
-        <ul id="player-list" class="players"></ul>
-        <div class="controls">
-          <button id="btn-undo">↶ Undo</button>
-          <button id="btn-restart">↻ Restart</button>
-          <button id="btn-rotl" title="Rotate view left">⟲</button>
-          <button id="btn-rotr" title="Rotate view right">⟳</button>
-        </div>
-        <label class="tilt">3D tilt <input id="tilt" type="range" min="0" max="60" value="45"></label>
-        <h3>Moves</h3>
-        <ol id="move-log" class="log"></ol>
-      </aside>
     </div>
+    <aside class="px-panel hud-panel" id="hud-panel">
+      <div id="fleets" class="fleets"></div>
+      <h3 class="px-head small">SHIP'S LOG</h3>
+      <ol id="log" class="log"></ol>
+    </aside>
+    <div id="toast" class="toast" aria-live="assertive"></div>
   </div>
+  <div id="tip" class="tip hidden"></div>
 
-  <!-- Dialogs -->
+  <!-- Dialogs (promotion, results, confirmations) -->
   <div id="overlay" class="overlay hidden">
-    <div id="dialog" class="dialog card"></div>
+    <div id="dialog" class="px-panel dotted dialog" role="dialog" aria-modal="true"></div>
   </div>
 
-  <script type="module" src="js/ui.js"></script>
+  <div id="boot" class="boot"><span>LOADING<b>...</b></span><p id="boot-err"></p></div>
+  <noscript><p class="boot">SPACE CHESS NEEDS JAVASCRIPT</p></noscript>
+
+  <script type="module" src="js/main.js"></script>
 </body>
 </html>

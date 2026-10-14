@@ -1,421 +1,419 @@
-// Space Chess rules engine: board representation, move generation, make/unmake.
+// Space Chess rules engine: board, move generation, make/unmake and Zobrist hashing.
 // Pure logic with no DOM access, so it runs in the page, in the AI worker and under Node tests.
 //
-// Board squares are indexed i = y * w + x, with y = 0 at the top of the screen.
-// A piece is { t: 'K'|'Q'|'R'|'B'|'N'|'P', p: playerIndex, m: hasMoved }.
+// Squares are indexed i = y * 8 + x (see rules.js). Internally a piece is a small integer:
+// its type (P=1 ... K=6) plus 8 for Nebula pieces; 0 is an empty square.
 //
-// Space rules, all driven by the mode object:
-//   mode.wrap       - orbit wrap: the left and right edges are joined, so files wrap around.
-//   mode.holes      - black holes: squares that don't exist (nothing lands on or passes through them).
-//   mode.wormholes  - [[a, b], ...] linked squares: a non-pawn piece on one may warp to the other.
+// The space rules all live in the geometry tables below:
+//   - orbit wrap: files wrap around (x is taken modulo 8), ranks don't;
+//   - black holes: missing squares, so rays stop in front of them and nothing lands on them;
+//   - wormhole: a non-pawn piece on one end may warp to (and attacks) the other end.
 
-export const VALUE = { P: 100, N: 350, B: 330, R: 500, Q: 900, K: 0 };
-export const PROMOS = ['Q', 'R', 'B', 'N'];
+import { isHole, warpTwin, START, sq, sqName } from './rules.js';
 
-const N_CLASSIC = [[1, 2], [2, 1], [-1, 2], [-2, 1], [1, -2], [2, -1], [-1, -2], [-2, -1]];
-const N_PLUS = [[2, 2], [2, -2], [-2, 2], [-2, -2]];
-const N_ALL = N_CLASSIC.concat(N_PLUS);
-const ORTHO = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-const DIAG = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
-const KING = ORTHO.concat(DIAG);
+export const P = 1, N = 2, B = 3, R = 4, Q = 5, K = 6;
+const LETTERS = ' PNBRQK';
+const CODE = { P, N, B, R, Q, K };
+export const pc = (type, side) => type | (side << 3);
 
-export function knightJumps(mode) {
-  return mode.knightPlus ? N_ALL : N_CLASSIC;
+export const FWD = [-1, 1];           // pawn direction: Solar moves up the screen, Nebula down
+const START_RANK = [6, 1];
+const PROMO_RANK = [0, 7];
+const PROMOS = ['Q', 'R', 'B', 'N'];
+
+// ---------- geometry ----------
+
+const VALID = Array.from({ length: 64 }, (_, i) => !isHole(i));
+const TWIN = Int8Array.from({ length: 64 }, (_, i) => warpTwin(i));
+
+// The square reached from i by (dx, dy), wrapping the files; -1 off the board or in a black hole.
+export function step(i, dx, dy) {
+  const y = (i >> 3) + dy;
+  if (y < 0 || y > 7) return -1;
+  const j = y * 8 + (((i & 7) + dx) & 7);
+  return VALID[j] ? j : -1;
 }
 
-export function validMask(mode) {
-  const valid = new Uint8Array(mode.w * mode.h);
-  for (let y = 0; y < mode.h; y++)
-    for (let x = 0; x < mode.w; x++)
-      valid[y * mode.w + x] = mode.holes && mode.holes(x, y) ? 0 : 1;
-  return valid;
-}
+// Directions 0-3 are orthogonal, 4-7 diagonal.
+export const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]];
 
-// For each square, the square its wormhole leads to (or -1).
-export function warpMap(mode) {
-  const warp = new Int16Array(mode.w * mode.h).fill(-1);
-  for (const [a, b] of mode.wormholes || []) { warp[a] = b; warp[b] = a; }
-  return warp;
-}
-
-export function createState(mode) {
-  const n = mode.players.length;
-  const board = new Array(mode.w * mode.h).fill(null);
-  const kings = new Array(n).fill(-1);
-  for (const { t, p, x, y } of mode.setup) {
-    const i = y * mode.w + x;
-    board[i] = { t, p, m: false };
-    if (t === 'K') kings[p] = i;
-  }
-  return {
-    mode, w: mode.w, h: mode.h, n, board, valid: validMask(mode), warp: warpMap(mode), kings,
-    turn: 0, alive: new Array(n).fill(true), ep: null, halfmove: 0, ply: 0,
-  };
-}
-
-// Deep copy of everything mutable; the hole mask and wormhole map are shared because they never change.
-export function cloneState(s) {
-  return {
-    ...s,
-    board: s.board.map(c => c && { ...c }),
-    kings: s.kings.slice(),
-    alive: s.alive.slice(),
-    ep: s.ep && { ...s.ep },
-  };
-}
-
-// Plain-data form for postMessage; restore() rebuilds it with the mode object.
-export function snapshot(s) {
-  const { mode, valid, warp, ...rest } = cloneState(s);
-  return { ...rest, modeId: mode.id };
-}
-
-export function restore(snap, mode) {
-  const { modeId, ...rest } = snap;
-  return { ...rest, mode, valid: validMask(mode), warp: warpMap(mode) };
-}
-
-// Loads a standard FEN into a 2-player 8x8 mode (used by tests). White = player 0.
-export function fromFEN(mode, fen) {
-  const [rows, side, castling, ep] = fen.trim().split(/\s+/);
-  const s = createState({ ...mode, setup: [] });
-  rows.split('/').forEach((row, y) => {
-    let x = 0;
-    for (const ch of row) {
-      if (/\d/.test(ch)) { x += +ch; continue; }
-      const p = ch === ch.toUpperCase() ? 0 : 1;
-      const t = ch.toUpperCase();
-      const homePawnRow = p === 0 ? 6 : 1;
-      const m = t === 'P' ? y !== homePawnRow : t === 'K' || t === 'R';
-      s.board[y * 8 + x] = { t, p, m };
-      if (t === 'K') s.kings[p] = y * 8 + x;
-      x++;
+// RAYS[i * 8 + d]: squares along direction d from i, nearest first. A ray is at most 7 steps
+// (one more would bring a rank ray back to its start) and ends at the edge or a black hole.
+export const RAYS = [];
+for (let i = 0; i < 64; i++) {
+  for (const [dx, dy] of DIRS) {
+    const ray = [];
+    for (let k = 1; k <= 7 && VALID[i]; k++) {
+      const j = step(i, dx * k, dy * k);
+      if (j < 0) break;
+      ray.push(j);
     }
-  });
-  const unmove = i => { if (s.board[i]) s.board[i].m = false; };
-  for (const r of castling === '-' ? '' : castling) {
-    const p = r === r.toUpperCase() ? 0 : 1;
-    const k = s.kings[p], y = (k - (k % 8)) / 8;
-    unmove(k);
-    const rook = y * 8 + ('Kk'.includes(r) ? 7 : 0);
-    if (s.board[rook]?.t === 'R') unmove(rook);
+    RAYS.push(ray);
   }
-  s.turn = side === 'w' ? 0 : 1;
-  if (ep && ep !== '-') {
-    const x = ep.charCodeAt(0) - 97, y = 8 - +ep[1];
-    const capY = s.turn === 0 ? y + 1 : y - 1;
-    s.ep = { to: y * 8 + x, cap: capY * 8 + x, p: 1 - s.turn };
+}
+
+// Leaper tables, flattened as [to, dx, dy, to, dx, dy, ...] per square.
+// The Rocket adds four 2+2 diagonal boosts to the usual L-jumps.
+const ROCKET = [[1, 2], [2, 1], [-1, 2], [-2, 1], [1, -2], [2, -1], [-1, -2], [-2, -1], [2, 2], [2, -2], [-2, 2], [-2, -2]];
+const leaps = offsets => Array.from({ length: 64 }, (_, i) => {
+  const out = [];
+  if (VALID[i]) for (const [dx, dy] of offsets) { const j = step(i, dx, dy); if (j >= 0) out.push(j, dx, dy); }
+  return out;
+});
+export const KNIGHT = leaps(ROCKET);
+export const KING = leaps(DIRS);
+
+// PAWN_HITS[side][i]: squares a pawn of `side` standing on i attacks, flattened as [to, dx, ...].
+export const PAWN_HITS = [0, 1].map(side => Array.from({ length: 64 }, (_, i) => {
+  const out = [];
+  if (VALID[i]) for (const dx of [-1, 1]) { const j = step(i, dx, FWD[side]); if (j >= 0) out.push(j, dx); }
+  return out;
+}));
+
+// Castling: the Commander's home square and its two rooks per side. Bits: 1 = Solar h1 (K),
+// 2 = Solar a1 (Q), 4 = Nebula h8 (k), 8 = Nebula a8 (q). Nebula is rotated, so its short side is a8.
+const KING_HOME = [60, 3];
+const CASTLES = [[{ rook: 63, bit: 1 }, { rook: 56, bit: 2 }], [{ rook: 7, bit: 4 }, { rook: 0, bit: 8 }]];
+const CASTLE_MASK = new Uint8Array(64).fill(15);
+CASTLE_MASK[60] = 15 & ~3; CASTLE_MASK[63] = 15 & ~1; CASTLE_MASK[56] = 15 & ~2;
+CASTLE_MASK[3] = 15 & ~12; CASTLE_MASK[7] = 15 & ~4; CASTLE_MASK[0] = 15 & ~8;
+
+// ---------- Zobrist hashing (two 32-bit halves, fixed seed so every thread agrees) ----------
+
+function mulberry32(a) {
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return (t ^ (t >>> 14)) | 0;
+  };
+}
+const rng = mulberry32(0x5ace5);
+const rand32 = n => Int32Array.from({ length: n }, rng);
+const ZL = rand32(16 * 64), ZH = rand32(16 * 64);
+const ZCL = rand32(16), ZCH = rand32(16);
+const ZEL = rand32(64), ZEH = rand32(64);
+const ZSL = rng(), ZSH = rng();
+
+// A position key that fits in a double exactly (53 bits).
+const keyOf = (lo, hi) => (hi & 0x1fffff) * 4294967296 + (lo >>> 0);
+
+// ---------- state ----------
+
+function blank() {
+  return {
+    board: new Int8Array(64), turn: 0, castle: 0, ep: -1, halfmove: 0, fullmove: 1,
+    kings: [-1, -1], lo: 0, hi: 0,
+    stack: [],   // undo records, one per makeMove
+    keys: [],    // position keys of the game so far, the current position last (for repetition)
+  };
+}
+
+// Recomputes the hash and Commander squares from the board, and restarts the key history.
+function finish(s) {
+  let lo = ZCL[s.castle], hi = ZCH[s.castle];
+  if (s.ep >= 0) { lo ^= ZEL[s.ep]; hi ^= ZEH[s.ep]; }
+  if (s.turn) { lo ^= ZSL; hi ^= ZSH; }
+  s.kings = [-1, -1];
+  for (let i = 0; i < 64; i++) {
+    const c = s.board[i];
+    if (!c) continue;
+    lo ^= ZL[c * 64 + i]; hi ^= ZH[c * 64 + i];
+    if ((c & 7) === K) s.kings[c >> 3] = i;
   }
+  s.lo = lo; s.hi = hi;
+  s.keys = [keyOf(lo, hi)];
   return s;
 }
 
-// Square index at (x, y), or -1 if it is off the board or a black hole. Files wrap in orbit mode.
-export function sqAt(s, x, y) {
-  if (y < 0 || y >= s.h) return -1;
-  if (x < 0 || x >= s.w) {
-    if (!s.mode.wrap) return -1;
-    x = ((x % s.w) + s.w) % s.w;
-  }
-  const i = y * s.w + x;
-  return s.valid[i] ? i : -1;
+export function newState() {
+  const s = blank();
+  for (const p of START) s.board[p.sq] = pc(CODE[p.type], p.side);
+  s.castle = 15;
+  return finish(s);
 }
 
-// Like sqAt but never wraps (castling stays on its own side of the seam).
-function sqFlat(s, x, y) {
-  return x >= 0 && y >= 0 && x < s.w && y < s.h && s.valid[y * s.w + x] ? y * s.w + x : -1;
-}
-
-// Longest useful ray. On a wrapped rank a longer ray would come back around to its start.
-const rayLen = s => Math.max(s.w, s.h) - 1;
-
-// On a wrapped board two rays can reach the same square (a rook going left or right around
-// an empty rank), so slide() stamps each target to emit every move only once.
-const stamp = new Int32Array(4096);
-let stampId = 0;
-
-export function sqName(s, i) {
-  const x = i % s.w, y = (i - x) / s.w;
-  return 'abcdefghijklmnop'[x] + (s.h - y);
-}
-
-// How far a square is from player p's back row (0 = back row).
-export function relRank(s, p, x, y) {
-  const [dx, dy] = s.mode.players[p].dir;
-  return dy < 0 ? s.h - 1 - y : dy > 0 ? y : dx > 0 ? x : s.w - 1 - x;
-}
-
-export function nextAlive(s, t) {
-  for (let k = 1; k <= s.n; k++) {
-    const q = (t + k) % s.n;
-    if (s.alive[q]) return q;
-  }
-  return t;
-}
-
-export function pseudoMoves(s, p, capturesOnly = false) {
-  const out = [];
-  const { w, board } = s;
-  for (let i = 0; i < board.length; i++) {
-    const pc = board[i];
-    if (!pc || pc.p !== p) continue;
-    const x = i % w, y = (i - x) / w;
-    const start = out.length;
-    switch (pc.t) {
-      case 'N': leap(s, p, i, x, y, knightJumps(s.mode), out, capturesOnly); break;
-      case 'K':
-        leap(s, p, i, x, y, KING, out, capturesOnly);
-        if (!capturesOnly) castles(s, p, i, x, y, pc, out);
-        break;
-      case 'R': slide(s, p, i, x, y, ORTHO, out, capturesOnly); break;
-      case 'B': slide(s, p, i, x, y, DIAG, out, capturesOnly); break;
-      case 'Q': slide(s, p, i, x, y, KING, out, capturesOnly); break;
-      case 'P': pawn(s, p, i, x, y, pc, out, capturesOnly); break;
+// Standard 6-field FEN. Uppercase = Solar, lowercase = Nebula; 'w' = Solar to move.
+export function fromFEN(fen) {
+  const [place, turn = 'w', castling = '-', ep = '-', half = '0', full = '1'] = fen.trim().split(/\s+/);
+  const rows = place.split('/');
+  if (rows.length !== 8) throw new Error('FEN needs 8 ranks: ' + fen);
+  const s = blank();
+  rows.forEach((row, y) => {
+    let x = 0;
+    for (const ch of row) {
+      if (ch >= '1' && ch <= '8') { x += +ch; continue; }
+      const t = CODE[ch.toUpperCase()], i = y * 8 + x;
+      if (!t || x > 7) throw new Error('bad FEN: ' + fen);
+      if (isHole(i)) throw new Error(`FEN puts a piece in the black hole on ${sqName(i)}`);
+      s.board[i] = pc(t, ch === ch.toUpperCase() ? 0 : 1);
+      x++;
     }
-    if (s.warp[i] >= 0 && pc.t !== 'P') warpMove(s, p, i, s.warp[i], out, start, capturesOnly);
-  }
-  return out;
+  });
+  s.turn = turn === 'b' ? 1 : 0;
+  for (const ch of castling) s.castle |= { K: 1, Q: 2, k: 4, q: 8 }[ch] || 0;
+  s.ep = ep === '-' ? -1 : sq(ep);
+  s.halfmove = +half;
+  s.fullmove = +full;
+  return finish(s);
 }
 
-// A non-pawn piece standing on a wormhole may warp to its twin, capturing an enemy there.
-// If the piece could already reach the twin normally (e.g. along a wrapped diagonal),
-// the ordinary move covers it.
-function warpMove(s, p, i, j, out, start, capturesOnly) {
-  for (let k = start; k < out.length; k++) if (out[k].to === j) return;
-  const t = s.board[j];
-  if (t) { if (t.p !== p) out.push({ from: i, to: j, cap: true, warp: true }); }
-  else if (!capturesOnly) out.push({ from: i, to: j, warp: true });
-}
-
-function leap(s, p, i, x, y, dirs, out, capturesOnly) {
-  for (const [dx, dy] of dirs) {
-    const j = sqAt(s, x + dx, y + dy);
-    if (j < 0) continue;
-    const t = s.board[j];
-    if (t) { if (t.p !== p) out.push({ from: i, to: j, cap: true }); }
-    else if (!capturesOnly) out.push({ from: i, to: j });
-  }
-}
-
-function slide(s, p, i, x, y, dirs, out, capturesOnly) {
-  const id = ++stampId, len = rayLen(s);
-  for (const [dx, dy] of dirs) {
-    for (let k = 1, cx = x + dx, cy = y + dy; k <= len; k++, cx += dx, cy += dy) {
-      const j = sqAt(s, cx, cy);
-      if (j < 0) break;
-      const t = s.board[j];
-      const fresh = stamp[j] !== id;
-      stamp[j] = id;
-      if (t) { if (t.p !== p && fresh) out.push({ from: i, to: j, cap: true }); break; }
-      if (!capturesOnly && fresh) out.push({ from: i, to: j });
+export function toFEN(s) {
+  const rows = [];
+  for (let y = 0; y < 8; y++) {
+    let row = '', gap = 0;
+    for (let x = 0; x < 8; x++) {
+      const c = s.board[y * 8 + x];
+      if (!c) { gap++; continue; }
+      if (gap) { row += gap; gap = 0; }
+      const l = LETTERS[c & 7];
+      row += c >> 3 ? l.toLowerCase() : l;
     }
+    rows.push(row + (gap || ''));
   }
+  const castle = ['K', 'Q', 'k', 'q'].filter((_, k) => s.castle & (1 << k)).join('') || '-';
+  return `${rows.join('/')} ${s.turn ? 'b' : 'w'} ${castle} ${s.ep >= 0 ? sqName(s.ep) : '-'} ${s.halfmove} ${s.fullmove}`;
 }
 
-function pawn(s, p, i, x, y, pc, out, capturesOnly) {
-  const [dx, dy] = s.mode.players[p].dir;
-  const sx = dy ? 1 : 0, sy = dx ? 1 : 0; // sideways axis
-  const add = (to, extra) => {
-    const tx = to % s.w, ty = (to - tx) / s.w;
-    if (relRank(s, p, tx, ty) >= s.mode.promoteRank) {
-      for (const t of PROMOS) out.push({ from: i, to, promo: t, ...extra });
-    } else out.push({ from: i, to, ...extra });
+export function cloneState(s) {
+  return { ...s, board: s.board.slice(), kings: s.kings.slice(), stack: s.stack.slice(), keys: s.keys.slice() };
+}
+
+// A plain JSON-safe copy (for postMessage). Keeps the key history since the last capture or
+// pawn move, which is all repetition detection needs; the undo stack is not kept.
+export function serialize(s) {
+  return {
+    board: Array.from(s.board), turn: s.turn, castle: s.castle, ep: s.ep,
+    halfmove: s.halfmove, fullmove: s.fullmove, keys: s.keys.slice(-(s.halfmove + 1)),
   };
-  const f = sqAt(s, x + dx, y + dy);
-  if (f >= 0 && !s.board[f] && !capturesOnly) {
-    add(f, {});
-    if (!pc.m && s.mode.doubleStep) {
-      const f2 = sqAt(s, x + 2 * dx, y + 2 * dy);
-      if (f2 >= 0 && !s.board[f2]) out.push({ from: i, to: f2, double: f });
-    }
-  }
-  for (const k of [-1, 1]) {
-    const c = sqAt(s, x + dx + k * sx, y + dy + k * sy);
-    if (c < 0) continue;
-    const t = s.board[c];
-    if (t) { if (t.p !== p) add(c, { cap: true }); }
-    else if (s.ep && s.ep.to === c && s.ep.p !== p) out.push({ from: i, to: c, cap: true, epCap: s.ep.cap });
-  }
 }
 
-// Generic castling: an unmoved king slides 2 squares along its back row toward an
-// unmoved rook (at least 3 squares away, path empty), and the rook hops over it.
-function castles(s, p, i, x, y, pc, out) {
-  if (pc.m || !s.mode.castling) return;
-  const [dx, dy] = s.mode.players[p].dir;
-  const ax = dy ? 1 : 0, ay = dx ? 1 : 0;
-  let inCheckNow = null;
-  for (const k of [-1, 1]) {
-    let cx = x + k * ax, cy = y + k * ay, dist = 1, j;
-    while ((j = sqFlat(s, cx, cy)) >= 0 && !s.board[j]) { cx += k * ax; cy += k * ay; dist++; }
-    if (j < 0) continue;
-    const r = s.board[j];
-    if (r.p !== p || r.t !== 'R' || r.m || dist < 3) continue;
-    if (inCheckNow === null) inCheckNow = attacked(s, i, p);
-    if (inCheckNow) return;
-    const a = sqFlat(s, x + k * ax, y + k * ay), b = sqFlat(s, x + 2 * k * ax, y + 2 * k * ay);
-    if (attacked(s, a, p) || attacked(s, b, p)) continue;
-    out.push({ from: i, to: b, castle: { from: j, to: a } });
-  }
+export function deserialize(o) {
+  const s = blank();
+  s.board = Int8Array.from(o.board);
+  Object.assign(s, { turn: o.turn, castle: o.castle, ep: o.ep, halfmove: o.halfmove, fullmove: o.fullmove });
+  finish(s);
+  if (o.keys && o.keys.length && o.keys[o.keys.length - 1] === s.keys[0]) s.keys = o.keys.slice();
+  return s;
 }
 
-// Is square i attacked by any piece whose owner satisfies isAttacker(owner)?
-export function attackedBy(s, i, isAttacker) {
-  const { w, board } = s;
-  const x = i % w, y = (i - x) / w;
-  for (const [dx, dy] of knightJumps(s.mode)) {
-    const j = sqAt(s, x + dx, y + dy);
-    if (j < 0) continue;
-    const t = board[j];
-    if (t && t.t === 'N' && isAttacker(t.p)) return true;
-  }
-  for (const [dx, dy] of KING) {
-    const j = sqAt(s, x + dx, y + dy);
-    if (j < 0) continue;
-    const t = board[j];
-    if (t && t.t === 'K' && isAttacker(t.p)) return true;
-  }
-  const len = rayLen(s);
-  for (const [dirs, a, b] of [[ORTHO, 'R', 'Q'], [DIAG, 'B', 'Q']]) {
-    for (const [dx, dy] of dirs) {
-      for (let k = 1, cx = x + dx, cy = y + dy; k <= len; k++, cx += dx, cy += dy) {
-        const j = sqAt(s, cx, cy);
-        if (j < 0) break;
-        const t = board[j];
-        if (!t) continue;
-        if ((t.t === a || t.t === b) && isAttacker(t.p)) return true;
-        break;
-      }
+export const positionKey = s => keyOf(s.lo, s.hi);
+export const kingSquare = (s, side) => s.kings[side];
+
+export function pieceAt(s, i) {
+  const c = s.board[i];
+  return c ? { type: LETTERS[c & 7], side: c >> 3 } : null;
+}
+
+// ---------- attacks ----------
+
+// Is square i attacked by a piece of side `by`?
+export function attacked(s, i, by) {
+  const b = s.board, o = by << 3;
+  const H = PAWN_HITS[by ^ 1][i];   // a pawn of `by` attacks i from where an enemy pawn on i would hit
+  for (let k = 0; k < H.length; k += 2) if (b[H[k]] === (P | o)) return true;
+  let L = KNIGHT[i];
+  for (let k = 0; k < L.length; k += 3) if (b[L[k]] === (N | o)) return true;
+  L = KING[i];
+  for (let k = 0; k < L.length; k += 3) if (b[L[k]] === (K | o)) return true;
+  for (let d = 0; d < 8; d++) {
+    const ray = RAYS[i * 8 + d], slider = (d < 4 ? R : B) | o;
+    for (let k = 0; k < ray.length; k++) {
+      const c = b[ray[k]];
+      if (c) { if (c === slider || c === (Q | o)) return true; break; }
     }
   }
-  for (let q = 0; q < s.n; q++) {
-    if (!isAttacker(q)) continue;
-    const [dx, dy] = s.mode.players[q].dir;
-    const sx = dy ? 1 : 0, sy = dx ? 1 : 0;
-    for (const k of [-1, 1]) {
-      const j = sqAt(s, x - dx - k * sx, y - dy - k * sy);
-      if (j < 0) continue;
-      const t = board[j];
-      if (t && t.t === 'P' && t.p === q) return true;
-    }
-  }
-  // A non-pawn piece on the twin wormhole can warp here.
-  const j = s.warp[i];
-  if (j >= 0) {
-    const t = board[j];
-    if (t && t.t !== 'P' && isAttacker(t.p)) return true;
-  }
+  const t = TWIN[i];
+  if (t >= 0) { const c = b[t]; if (c && c >> 3 === by && (c & 7) !== P) return true; }
   return false;
 }
 
-// Is square i attacked by anyone other than player p?
-export function attacked(s, i, p) {
-  return attackedBy(s, i, q => q !== p);
+export function inCheck(s, side = s.turn) {
+  const k = s.kings[side];
+  return k >= 0 && attacked(s, k, side ^ 1);
 }
 
-export function inCheck(s, p) {
-  const k = s.kings[p];
-  return k >= 0 && attacked(s, k, p);
+// ---------- move generation ----------
+
+function mv(from, to, piece, side, cap, capSq, promo, kind, vx, vy, rookFrom = -1, rookTo = -1) {
+  return {
+    from, to, piece: LETTERS[piece & 7], side, cap: cap ? LETTERS[cap & 7] : null, capSq: cap ? capSq : -1,
+    promo, kind, vx, vy, rookFrom, rookTo,
+  };
 }
 
-export function makeMove(s, mv) {
-  const b = s.board, pc = b[mv.from];
-  const capSq = mv.epCap ?? mv.to;
-  const u = { mv, pc, cap: b[capSq], capSq, m: pc.m, t: pc.t, ep: s.ep, half: s.halfmove, turn: s.turn, rm: false };
-  if (u.cap) {
-    b[capSq] = null;
-    if (u.cap.t === 'K') s.kings[u.cap.p] = -1;
-  }
-  b[mv.from] = null;
-  b[mv.to] = pc;
-  pc.m = true;
-  if (mv.promo) pc.t = mv.promo;
-  if (pc.t === 'K') s.kings[pc.p] = mv.to;
-  if (mv.castle) {
-    const r = b[mv.castle.from];
-    u.rm = r.m;
-    b[mv.castle.from] = null;
-    b[mv.castle.to] = r;
-    r.m = true;
-  }
-  s.ep = mv.double !== undefined && s.mode.enPassant ? { to: mv.double, cap: mv.to, p: pc.p } : null;
-  s.halfmove = u.t === 'P' || u.cap ? 0 : s.halfmove + 1;
-  s.ply++;
-  s.turn = nextAlive(s, s.turn);
-  return u;
-}
+// SEEN[j] === id marks squares the current piece already reaches, so each target is listed once.
+const SEEN = new Int32Array(64);
+let seenId = 0;
 
-export function unmakeMove(s, u) {
-  const b = s.board, mv = u.mv, pc = u.pc;
-  if (mv.castle) {
-    const r = b[mv.castle.to];
-    b[mv.castle.to] = null;
-    b[mv.castle.from] = r;
-    r.m = u.rm;
-  }
-  b[mv.to] = null;
-  b[mv.from] = pc;
-  pc.m = u.m;
-  pc.t = u.t;
-  if (pc.t === 'K') s.kings[pc.p] = mv.from;
-  if (u.cap) {
-    b[u.capSq] = u.cap;
-    if (u.cap.t === 'K') s.kings[u.cap.p] = u.capSq;
-  }
-  s.ep = u.ep;
-  s.halfmove = u.half;
-  s.turn = u.turn;
-  s.ply--;
-}
-
-// Moves for player p that don't leave p's own king attacked.
-export function legalMoves(s, p = s.turn, capturesOnly = false) {
-  const out = [];
-  for (const mv of pseudoMoves(s, p, capturesOnly)) {
-    const u = makeMove(s, mv);
-    const k = s.kings[p];
-    if (k < 0 || !attacked(s, k, p)) out.push(mv);
-    unmakeMove(s, u);
+// Every move of the side to move, ignoring whether it leaves its own Commander in check.
+// capturesOnly keeps captures and Flagship promotions (for the AI's quiescence search).
+export function pseudoMoves(s, capturesOnly = false) {
+  const b = s.board, side = s.turn, out = [];
+  for (let i = 0; i < 64; i++) {
+    const c = b[i];
+    if (!c || c >> 3 !== side) continue;
+    const t = c & 7;
+    if (t === P) { pawnMoves(s, i, c, side, capturesOnly, out); continue; }
+    const id = ++seenId;
+    if (t === N || t === K) {
+      const L = t === N ? KNIGHT[i] : KING[i];
+      for (let k = 0; k < L.length; k += 3) {
+        const j = L[k], tc = b[j];
+        if (tc && tc >> 3 === side) continue;
+        SEEN[j] = id;
+        if (tc) out.push(mv(i, j, c, side, tc, j, null, 'move', L[k + 1], L[k + 2]));
+        else if (!capturesOnly) out.push(mv(i, j, c, side, 0, -1, null, 'move', L[k + 1], L[k + 2]));
+      }
+      if (t === K && !capturesOnly) castles(s, i, side, out);
+    } else {
+      // Walk all of the slider's rays together, one step at a time. When the orbit lets two rays
+      // reach the same square (a Station going either way round an open rank), the shorter path wins.
+      const d0 = t === B ? 4 : 0, d1 = t === R ? 4 : 8;
+      let open = ((1 << d1) - 1) & ~((1 << d0) - 1);
+      for (let k = 0; open; k++) {
+        for (let d = d0; d < d1; d++) {
+          if (!(open & (1 << d))) continue;
+          const ray = RAYS[i * 8 + d];
+          if (k >= ray.length) { open &= ~(1 << d); continue; }
+          const j = ray[k], tc = b[j];
+          if (tc) open &= ~(1 << d);
+          if (SEEN[j] === id || (tc && tc >> 3 === side)) continue;
+          SEEN[j] = id;
+          const vx = DIRS[d][0] * (k + 1), vy = DIRS[d][1] * (k + 1);
+          if (tc) out.push(mv(i, j, c, side, tc, j, null, 'move', vx, vy));
+          else if (!capturesOnly) out.push(mv(i, j, c, side, 0, -1, null, 'move', vx, vy));
+        }
+      }
+    }
+    // The wormhole: a warp is only listed when the piece can't already fly to the twin normally.
+    const tw = TWIN[i];
+    if (tw >= 0 && SEEN[tw] !== id) {
+      const tc = b[tw];
+      if (tc) { if (tc >> 3 !== side) out.push(mv(i, tw, c, side, tc, tw, null, 'warp', 0, 0)); }
+      else if (!capturesOnly) out.push(mv(i, tw, c, side, 0, -1, null, 'warp', 0, 0));
+    }
   }
   return out;
 }
 
-// The (dx, dy) a move travels on screen. On a wrapped board a slide may cross the seam, so take
-// the shortest direction whose path is actually clear (call this before making the move).
-export function travel(s, mv) {
-  const fx = mv.from % s.w, fy = (mv.from - fx) / s.w, tx = mv.to % s.w, ty = (mv.to - tx) / s.w;
-  const dy = ty - fy, dx = tx - fx;
-  if (!s.mode.wrap || mv.warp || mv.castle) return [dx, dy];
-  const options = [dx, dx - s.w, dx + s.w].sort((a, b) => Math.abs(a) - Math.abs(b));
-  const pc = s.board[mv.from];
-  if (!pc || !'RBQ'.includes(pc.t)) return [options[0], dy];
-  for (const ox of options) {
-    if (!(ox === 0 || dy === 0 || Math.abs(ox) === Math.abs(dy))) continue;
-    const n = Math.max(Math.abs(ox), Math.abs(dy)), sx = Math.sign(ox), sy = Math.sign(dy);
-    let clear = true;
-    for (let k = 1; k < n && clear; k++) {
-      const j = sqAt(s, fx + k * sx, fy + k * sy);
-      clear = j >= 0 && !s.board[j];
+function pawnMoves(s, i, c, side, capturesOnly, out) {
+  const b = s.board, dy = FWD[side], y = i >> 3;
+  const promo = y + dy === PROMO_RANK[side];
+  const add = (to, cap, capSq, kind, vx, vy) => {
+    if (!promo) out.push(mv(i, to, c, side, cap, capSq, null, kind, vx, vy));
+    else for (const p of capturesOnly ? ['Q'] : PROMOS) out.push(mv(i, to, c, side, cap, capSq, p, kind, vx, vy));
+  };
+  const one = step(i, 0, dy);
+  if (one >= 0 && !b[one] && (!capturesOnly || promo)) {
+    add(one, 0, -1, 'move', 0, dy);
+    if (!capturesOnly && y === START_RANK[side]) {
+      const two = step(i, 0, 2 * dy);
+      if (two >= 0 && !b[two]) add(two, 0, -1, 'double', 0, 2 * dy);
     }
-    if (clear) return [ox, dy];
   }
-  return [options[0], dy];
+  const H = PAWN_HITS[side][i];
+  for (let k = 0; k < H.length; k += 2) {
+    const j = H[k], tc = b[j];
+    if (tc) { if (tc >> 3 !== side) add(j, tc, j, 'move', H[k + 1], dy); }
+    else if (j === s.ep && b[j - 8 * dy] === pc(P, side ^ 1)) add(j, b[j - 8 * dy], j - 8 * dy, 'ep', H[k + 1], dy);
+  }
 }
 
-export function positionKey(s) {
-  let k = s.turn + ':' + (s.ep ? s.ep.to : '-') + ':';
-  for (const c of s.board) k += c ? c.p + c.t + (c.m ? '' : '*') : '.';
-  return k;
+// Castling never crosses the orbit seam: the Commander and Station must be on their home squares,
+// with everything between them empty, and the Commander may not start in, cross or land in check.
+function castles(s, i, side, out) {
+  if (i !== KING_HOME[side]) return;
+  const b = s.board, foe = side ^ 1;
+  let checked = null;
+  for (const { rook, bit } of CASTLES[side]) {
+    if (!(s.castle & bit) || b[rook] !== pc(R, side)) continue;
+    const dir = rook > i ? 1 : -1;
+    let clear = true;
+    for (let j = i + dir; j !== rook; j += dir) if (b[j]) { clear = false; break; }
+    if (!clear) continue;
+    if (checked === null) checked = attacked(s, i, foe);
+    if (checked || attacked(s, i + dir, foe) || attacked(s, i + 2 * dir, foe)) continue;
+    out.push(mv(i, i + 2 * dir, b[i], side, 0, -1, null, 'castle', 2 * dir, 0, rook, i + dir));
+  }
 }
 
+export function legalMoves(s) {
+  const side = s.turn, out = [];
+  for (const m of pseudoMoves(s)) {
+    makeMove(s, m);
+    if (!inCheck(s, side)) out.push(m);
+    unmakeMove(s);
+  }
+  return out;
+}
+
+// ---------- make / unmake ----------
+
+export function makeMove(s, m) {
+  const b = s.board, side = s.turn, piece = b[m.from];
+  const cap = m.capSq >= 0 ? b[m.capSq] : 0;
+  s.stack.push({ m, cap, castle: s.castle, ep: s.ep, halfmove: s.halfmove, lo: s.lo, hi: s.hi });
+
+  let lo = s.lo ^ ZCL[s.castle] ^ ZSL, hi = s.hi ^ ZCH[s.castle] ^ ZSH;
+  if (s.ep >= 0) { lo ^= ZEL[s.ep]; hi ^= ZEH[s.ep]; }
+  if (cap) { b[m.capSq] = 0; lo ^= ZL[cap * 64 + m.capSq]; hi ^= ZH[cap * 64 + m.capSq]; }
+  const placed = m.promo ? pc(CODE[m.promo], side) : piece;
+  b[m.from] = 0; lo ^= ZL[piece * 64 + m.from]; hi ^= ZH[piece * 64 + m.from];
+  b[m.to] = placed; lo ^= ZL[placed * 64 + m.to]; hi ^= ZH[placed * 64 + m.to];
+  if ((piece & 7) === K) s.kings[side] = m.to;
+  if (m.kind === 'castle') {
+    const rook = b[m.rookFrom];
+    b[m.rookFrom] = 0; lo ^= ZL[rook * 64 + m.rookFrom]; hi ^= ZH[rook * 64 + m.rookFrom];
+    b[m.rookTo] = rook; lo ^= ZL[rook * 64 + m.rookTo]; hi ^= ZH[rook * 64 + m.rookTo];
+  }
+
+  s.castle &= CASTLE_MASK[m.from] & CASTLE_MASK[m.to];
+  s.ep = m.kind === 'double' ? (m.from + m.to) >> 1 : -1;
+  lo ^= ZCL[s.castle]; hi ^= ZCH[s.castle];
+  if (s.ep >= 0) { lo ^= ZEL[s.ep]; hi ^= ZEH[s.ep]; }
+  s.halfmove = (piece & 7) === P || cap ? 0 : s.halfmove + 1;
+  if (side === 1) s.fullmove++;
+  s.turn = side ^ 1;
+  s.lo = lo; s.hi = hi;
+  s.keys.push(keyOf(lo, hi));
+}
+
+// Passes the turn (the AI's null-move pruning). Undone by unmakeMove.
+export function makeNull(s) {
+  s.stack.push({ m: null, ep: s.ep, halfmove: s.halfmove, lo: s.lo, hi: s.hi });
+  let lo = s.lo ^ ZSL, hi = s.hi ^ ZSH;
+  if (s.ep >= 0) { lo ^= ZEL[s.ep]; hi ^= ZEH[s.ep]; s.ep = -1; }
+  s.turn ^= 1;
+  s.halfmove = 0;   // repetition checks must not look back across a null move
+  s.lo = lo; s.hi = hi;
+  s.keys.push(keyOf(lo, hi));
+}
+
+export function unmakeMove(s) {
+  const u = s.stack.pop();
+  if (!u) return false;
+  s.keys.pop();
+  s.ep = u.ep; s.halfmove = u.halfmove; s.lo = u.lo; s.hi = u.hi;
+  const m = u.m;
+  if (!m) { s.turn ^= 1; return true; }
+  const b = s.board, side = s.turn ^ 1;
+  const moved = m.promo ? pc(P, side) : b[m.to];
+  b[m.to] = 0;
+  b[m.from] = moved;
+  if (u.cap) b[m.capSq] = u.cap;
+  if (m.kind === 'castle') { b[m.rookFrom] = b[m.rookTo]; b[m.rookTo] = 0; }
+  if ((moved & 7) === K) s.kings[side] = m.from;
+  s.turn = side;
+  s.castle = u.castle;
+  if (side === 1) s.fullmove--;
+  return true;
+}
+
+// Counts leaf positions (for tests and debugging).
 export function perft(s, depth) {
   if (depth === 0) return 1;
-  const moves = legalMoves(s);
-  if (depth === 1) return moves.length;
   let n = 0;
-  for (const mv of moves) {
-    const u = makeMove(s, mv);
-    n += perft(s, depth - 1);
-    unmakeMove(s, u);
-  }
+  for (const m of legalMoves(s)) { makeMove(s, m); n += perft(s, depth - 1); unmakeMove(s); }
   return n;
 }

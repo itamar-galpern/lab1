@@ -1,83 +1,100 @@
-// Game controller: applies moves, tracks history for undo, and decides results
-// (checkmate, stalemate and draws).
+// Game controller: plays legal moves, keeps the move log and captures, takes moves back,
+// and decides results (checkmate, stalemate and the draw rules).
 
-import { createState, cloneState, legalMoves, makeMove, inCheck, positionKey, sqName } from './engine.js';
-import { PIECES } from './space.js';
+import { newState, fromFEN, legalMoves, makeMove, unmakeMove, inCheck, pieceAt } from './engine.js';
+import { PIECES, sqName } from './rules.js';
 
 export class Game {
-  constructor(mode) {
-    this.mode = mode;
-    this.s = createState(mode);
-    this.history = [];
-    this.log = [];
-    this.result = null; // { winner: playerIndex | null, reason }
-    this.lastMove = null;
-    this.reps = new Map();
-    this.countPosition();
+  // fen is optional: tests and puzzles can start from any position.
+  constructor(fen) {
+    this.state = fen ? fromFEN(fen) : newState();
+    this.log = [];              // [{ side, text, move }]
+    this.captured = [[], []];   // ship types each side has captured
+    this.result = null;         // null | { winner: 0 | 1 | null, reason }
+    this._moves = null;
   }
 
-  get turn() { return this.s.turn; }
+  get turn() { return this.state.turn; }
+  get canUndo() { return this.log.length > 0; }
+  get lastMove() { return this.log.length ? this.log[this.log.length - 1].move : null; }
 
-  legal() { return this.result ? [] : legalMoves(this.s); }
-
-  checked() { return !this.result && inCheck(this.s, this.s.turn); }
-
-  countPosition() {
-    const k = positionKey(this.s);
-    const c = (this.reps.get(k) || 0) + 1;
-    this.reps.set(k, c);
-    return c;
+  moves() {
+    if (this.result) return [];
+    return this._moves || (this._moves = legalMoves(this.state));
   }
 
-  // Applies a legal move and returns the undo record (it names the captured piece, if any).
-  play(mv) {
-    const s = this.s;
-    this.history.push({
-      s: cloneState(s), logLen: this.log.length, reps: new Map(this.reps),
-      result: this.result, lastMove: this.lastMove,
-    });
-    const mover = s.turn;
-    const text = this.describe(mv);
-    const u = makeMove(s, mv);
-    this.lastMove = mv;
-    this.resolveTurn();
+  movesFrom(i) { return this.moves().filter(m => m.from === i); }
 
-    let suffix = '';
-    if (this.result && this.result.reason === 'checkmate') suffix = '#';
-    else if (!this.result && inCheck(s, s.turn)) suffix = '+';
-    this.log.push({ p: mover, text: text + suffix, cap: u.cap ? u.cap.t : null, warp: !!mv.warp });
-    return u;
-  }
+  inCheck() { return !this.result && inCheck(this.state); }
 
-  resolveTurn() {
-    const s = this.s;
-    if (!legalMoves(s).length) {
-      this.result = inCheck(s, s.turn)
-        ? { winner: 1 - s.turn, reason: 'checkmate' }
-        : { winner: null, reason: 'stalemate' };
-    } else if (s.halfmove >= 100) this.result = { winner: null, reason: '50-move rule' };
-    else if (this.countPosition() >= 3) this.result = { winner: null, reason: 'threefold repetition' };
-    else if (s.board.every(c => !c || c.t === 'K')) this.result = { winner: null, reason: 'only Commanders left' };
+  pieceAt(i) { return pieceAt(this.state, i); }
+
+  board() { return Array.from({ length: 64 }, (_, i) => pieceAt(this.state, i)); }
+
+  // Accepts any { from, to, promo } that matches a legal move.
+  play(move) {
+    const m = this.moves().find(x => x.from === move.from && x.to === move.to && x.promo === (move.promo || null));
+    if (!m) throw new Error(`illegal move ${sqName(move.from)}-${sqName(move.to)}`);
+    const text = describe(m);
+    makeMove(this.state, m);
+    this._moves = null;
+    if (m.cap) this.captured[m.side].push(m.cap);
+    this.result = this.judge();
+    const check = inCheck(this.state);
+    const mate = !!this.result && this.result.reason === 'checkmate';
+    const full = text + (mate ? '#' : check ? '+' : '');
+    this.log.push({ side: m.side, text: full, move: m });
+    return { move: m, text: full, check, mate, result: this.result };
   }
 
   undo() {
-    const h = this.history.pop();
-    if (!h) return false;
-    this.s = h.s;
-    this.log.length = h.logLen;
-    this.reps = h.reps;
-    this.result = h.result;
-    this.lastMove = h.lastMove;
+    if (!this.log.length) return false;
+    const { side, move } = this.log.pop();
+    unmakeMove(this.state);
+    if (move.cap) this.captured[side].pop();
+    this.result = null;
+    this._moves = null;
     return true;
   }
 
-  // Move text with space names, in plain ASCII for the pixel fonts:
-  // "Rocket b1-c3", "Comet c1xh6", "Station b3~g6" (a warp), "Astronaut e7-e8=Flagship".
-  describe(mv) {
-    const s = this.s, pc = s.board[mv.from];
-    if (mv.castle) return Math.abs(mv.castle.from - mv.from) > 3 ? 'Dock O-O-O' : 'Dock O-O';
-    const sep = (mv.warp ? '~' : '') + (mv.cap ? 'x' : mv.warp ? '' : '-');
-    const promo = mv.promo ? '=' + PIECES[mv.promo].name : '';
-    return `${PIECES[pc.t].name} ${sqName(s, mv.from)}${sep}${sqName(s, mv.to)}${promo}`;
+  judge() {
+    const s = this.state;
+    this._moves = legalMoves(s);
+    if (!this._moves.length) {
+      return inCheck(s) ? { winner: s.turn ^ 1, reason: 'checkmate' } : { winner: null, reason: 'stalemate' };
+    }
+    if (s.halfmove >= 100) return { winner: null, reason: 'fifty-move rule' };
+    if (this.repetitions() >= 3) return { winner: null, reason: 'threefold repetition' };
+    if (insufficient(s)) return { winner: null, reason: 'insufficient material' };
+    return null;
   }
+
+  // How many times the current position has occurred (same side to move, castling rights and ep).
+  repetitions() {
+    const { keys, halfmove } = this.state, last = keys.length - 1;
+    let n = 0;
+    for (let k = 0; k <= halfmove && k <= last; k += 2) if (keys[last - k] === keys[last]) n++;
+    return n;
+  }
+}
+
+// Commanders alone, or a Commander and one Comet or Rocket against a lone Commander.
+function insufficient(s) {
+  let minors = 0;
+  for (let i = 0; i < 64; i++) {
+    const p = pieceAt(s, i);
+    if (!p || p.type === 'K') continue;
+    if (p.type === 'B' || p.type === 'N') minors++;
+    else return false;
+  }
+  return minors <= 1;
+}
+
+// Move text with space names, e.g. 'Rocket g1-f3', 'Comet c4xf7', 'Station b3~g6' (a warp),
+// 'Commander O-O', 'Astronaut e7-e8=Flagship'. Check and mate marks are added by play().
+export function describe(m) {
+  const name = PIECES[m.piece].name;
+  if (m.kind === 'castle') return `${name} ${Math.abs(m.rookFrom - m.from) === 3 ? 'O-O' : 'O-O-O'}`;
+  const sep = m.kind === 'warp' ? (m.cap ? '~x' : '~') : m.cap ? 'x' : '-';
+  return `${name} ${sqName(m.from)}${sep}${sqName(m.to)}${m.promo ? '=' + PIECES[m.promo].name : ''}`;
 }

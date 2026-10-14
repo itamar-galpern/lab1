@@ -1,73 +1,66 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SPACE, sq } from '../js/space.js';
-import { fromFEN, createState, legalMoves, makeMove, unmakeMove, inCheck, snapshot, restore } from '../js/engine.js';
-import { chooseMove, LEVELS } from '../js/ai.js';
+import { sq } from '../js/rules.js';
+import { newState, fromFEN, toFEN, legalMoves, makeMove, inCheck, serialize, deserialize } from '../js/engine.js';
+import { LEVELS, chooseMove } from '../js/ai.js';
 
-const space = fen => fromFEN(SPACE, fen);
+const seeded = (a => () => ((a = (a * 16807) % 2147483647) / 2147483647))(42);
+const isLegal = (s, m) => legalMoves(s).some(x => x.from === m.from && x.to === m.to && x.promo === m.promo);
 
-test('Captain and up find mate in one', () => {
-  // Back-rank mate; with orbit wrap the a-file squares next to h8 must be covered too.
-  const s = space('n6k/p5pp/8/8/8/8/8/2K1R3 w - - 0 1');
-  for (const lv of ['captain', 'admiral', 'overlord']) {
-    const mv = chooseMove(s, lv);
-    const u = makeMove(s, mv);
-    assert.ok(inCheck(s, 1) && legalMoves(s).length === 0, `${lv} missed the mate`);
-    unmakeMove(s, u);
-  }
-});
+function isMate(s, m) {
+  makeMove(s, m);
+  return inCheck(s) && legalMoves(s).length === 0;
+}
 
-test('Admiral and Overlord grab a hanging Flagship', () => {
-  const s = space('k7/8/8/3q4/8/8/3R4/K7 w - - 0 1');
-  for (const lv of ['admiral', 'overlord']) assert.equal(chooseMove(s, lv).to, sq('d5'), lv);
-});
-
-test('the AI warps through a wormhole to capture', () => {
-  const s = space('4k3/8/6q1/8/8/1R6/8/4K3 w - - 0 1');
-  for (const lv of ['admiral', 'overlord']) {
-    const mv = chooseMove(s, lv);
-    assert.ok(mv.from === sq('b3') && mv.to === sq('g6') && mv.warp, lv);
-  }
-});
-
-test('the AI finds a mate through a wormhole', () => {
-  const s = space('6rk/6pn/8/8/8/1N6/8/4K3 w - - 0 1');
-  for (const lv of ['captain', 'overlord']) {
-    const mv = chooseMove(s, lv);
-    assert.ok(mv.from === sq('b3') && mv.to === sq('g6') && mv.warp, lv);
-  }
-});
-
-test('every level returns a legal move within its time budget', () => {
+test('every level returns a legal move from the start position', () => {
+  assert.deepEqual(LEVELS.map(l => l.id), ['cadet', 'pilot', 'captain', 'admiral', 'overlord']);
   for (const lv of LEVELS) {
-    const s = createState(SPACE);
-    const t0 = Date.now();
-    const mv = chooseMove(s, lv.id);
-    const ms = Date.now() - t0;
-    assert.ok(legalMoves(s).some(m => m.from === mv.from && m.to === mv.to), lv.id);
-    assert.ok(ms < lv.time + 1500, `${lv.id} took ${ms}ms`);
+    assert.ok(lv.name && lv.blurb);
+    const s = newState();
+    const m = chooseMove(s, lv.id, { rand: seeded, timeScale: 0.05 });
+    assert.ok(isLegal(s, m), lv.id);
   }
 });
 
-test('snapshot/restore round-trips through structured clone', () => {
-  const s = createState(SPACE);
-  const back = restore(structuredClone(snapshot(s)), SPACE);
-  assert.equal(legalMoves(back).length, legalMoves(s).length);
-  assert.deepEqual([...back.warp], [...s.warp]);
+test('finds a mate in one through the wormhole', () => {
+  const s = fromFEN('8/5ppp/5pkp/5ppp/8/8/P7/1R2K3 w - - 0 1');
+  const m = chooseMove(s, 'captain', { rand: seeded, timeScale: 0.5 });
+  assert.ok(isMate(s, m), `played ${m.from}-${m.to}`);
 });
 
-test('Admiral beats Cadet in a short duel (sanity check of strength)', () => {
-  let seed = 7;
-  const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
-  const s = createState(SPACE);
-  const levels = ['admiral', 'cadet'];
-  for (let ply = 0; ply < 80; ply++) {
-    if (!legalMoves(s).length) break;
-    makeMove(s, chooseMove(s, levels[s.turn], rand));
+test('finds a mate in one round the orbit', () => {
+  const s = fromFEN('4k3/3ppp2/1Q6/8/8/8/8/4K3 w - - 0 1');
+  const m = chooseMove(s, 'admiral', { rand: seeded, timeScale: 0.5 });
+  assert.ok(isMate(s, m), `played ${m.from}-${m.to}`);
+});
+
+test('captures a hanging Flagship', () => {
+  const s = fromFEN('3k4/8/8/q7/8/8/8/R5K1 w - - 0 1');
+  for (const level of ['pilot', 'captain', 'admiral']) {
+    const m = chooseMove(s, level, { rand: seeded, timeScale: 0.3 });
+    assert.equal(m.to, sq('a5'), level);
   }
-  const val = { P: 1, N: 3, B: 3, R: 5, Q: 9, K: 0 };
-  const mat = [0, 0];
-  s.board.forEach(c => { if (c) mat[c.p] += val[c.t]; });
-  const mated = !legalMoves(s).length;
-  assert.ok(mat[0] > mat[1] || mated, `material solar ${mat[0]} nebula ${mat[1]}`);
+});
+
+test('Nebula plays too, and the search works on a deserialized state', () => {
+  const s = newState();
+  makeMove(s, legalMoves(s).find(m => m.from === sq('e2') && m.to === sq('e4')));
+  const copy = deserialize(JSON.parse(JSON.stringify(serialize(s))));
+  const m = chooseMove(copy, 'captain', { rand: seeded, timeScale: 0.2 });
+  assert.equal(m.side, 1);
+  assert.ok(isLegal(s, m));
+});
+
+test('never changes the state it is given', () => {
+  const s = newState();
+  for (let k = 0; k < 6; k++) makeMove(s, legalMoves(s)[k * 3 % legalMoves(s).length]);
+  const before = [toFEN(s), JSON.stringify(serialize(s)), s.stack.length, s.keys.length];
+  chooseMove(s, 'admiral', { rand: seeded, timeScale: 0.1 });
+  assert.deepEqual([toFEN(s), JSON.stringify(serialize(s)), s.stack.length, s.keys.length], before);
+});
+
+test('returns null when there is no legal move', () => {
+  const stalemate = fromFEN('7k/3R4/7N/8/8/8/8/4K3 b - - 0 1');
+  assert.equal(legalMoves(stalemate).length, 0);
+  assert.equal(chooseMove(stalemate, 'captain'), null);
 });
