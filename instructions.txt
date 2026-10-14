@@ -1,0 +1,11 @@
+Goal: find out what a coding agent can actually do. In one hour you and a partner will describe something in English — a game, a visualization, a simulation, a tool — and put it on the internet, working, at a real URL. At the end of class, we will vote on the coolest demo. The winners will have their demo linked on the course website; if you would rather not, tell your lab instructor in advance. Good luck.
+
+An agent isn't autocomplete and it isn't a chat window you copy out of. It runs on your machine: you describe what you want, it writes and edits real files, runs commands, and you look and ask for more. Aim for something live and interactive; first-lab grading is lenient (see below).
+
+Phase 2 — Build, publish, and improve (60 min)
+
+Get something on screen. Give the agent your idea, let it work, and open the result in a browser. Notice what it does without being asked: files, commands, and decisions.
+
+Publish early, before polishing. Ask the agent to create the repository, push the code, and switch on GitHub Pages. GitHub Pages allows you to have a repository with HTML or web content that is just live online. Open your live URL: https://<username>.github.io/<repo>/. Let the agent work out the steps; ask the lab instructor if you get stuck.
+
+Share your URL. Your lab instructor will share the section's spreadsheet during class. One partner adds a new row with your demo title, live URL, and both partners' student ID numbers and Hebrew University emails; leave other pairs' rows alone.
